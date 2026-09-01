@@ -1,0 +1,147 @@
+#!/bin/sh
+# dash-init: helper that makes a headless dash boot reachable + renders the dash.
+#
+# Owned by /etc/upstart/dash-init.conf (which decides WHEN to dash and handles
+# framework gating + reboot recovery). This script only:
+#   1. brings up USB networking + SSH (idempotent fallback), and
+#   2. brings up WiFi (wlan0 via ath6kl_sdio + wpa_supplicant + udhcpc), and
+#   3. runs the dash binary (the e-ink panel retains the rendered image).
+#
+# Sandbox use: run directly from a shell to render + verify (network is a no-op
+# when already up, e.g. under stock usbnet).
+
+PATH=/sbin:/bin:/usr/sbin:/usr/bin
+export PATH
+
+DASH_BIN=/mnt/us/dash/kindle-dash
+NET_IP=192.168.15.244
+G_ETH_MOD=/lib/modules/3.0.35-lab126/kernel/drivers/usb/gadget/g_ether.ko
+ATH6KL_MOD=/lib/modules/3.0.35-lab126/kernel/compat-wireless/drivers/net/wireless/ath/ath6kl/ath6kl_sdio.ko
+CALFILE=/opt/ar6k/target/AR6003/hw2.1.1/bin/AR6003_wfo_calfile.bin
+SUP_CONF=/var/local/system/wpa_supplicant.conf
+SUP_PID=/mnt/us/usbnet/run/wpa_supplicant.pid
+
+log() { printf 'dash-init: %s\n' "$*"; }
+
+net_up() {
+    if ! grep -q '^g_ether' /proc/modules 2>/dev/null; then
+        insmod "$G_ETH_MOD" 2>/dev/null || log "warn: could not load g_ether"
+    fi
+
+    i=0
+    while [ ! -e /sys/class/net/usb0 ] && [ "$i" -lt 20 ]; do
+        sleep 1
+        i=$((i + 1))
+    done
+    if [ -e /sys/class/net/usb0 ] && ! ifconfig usb0 2>/dev/null | grep -q 'inet addr:'; then
+        ifconfig usb0 "$NET_IP" up 2>/dev/null
+    fi
+
+    if [ ! -f /mnt/us/usbnet/run/sshd.pid ] ||
+       ! kill -0 "$(cat /mnt/us/usbnet/run/sshd.pid 2>/dev/null)" 2>/dev/null; then
+        /usr/bin/dropbear -P /mnt/us/usbnet/run/sshd.pid -K 15 -n 2>/dev/null \
+            || log "warn: could not start dropbear"
+    fi
+}
+
+# WiFi bring-up for dash (stock UI/framework is gated off, so we do it here).
+# Uses the same AR6003 ath6kl driver + wpa_supplicant as stock, then DHCP.
+wifi_up() {
+    # 0. Amazon's wifid job ('start on started lab126', respawn) is up during
+    #    dash boot even though the framework is gated, and it contends for
+    #    wlan0 / spawns its own wpa_supplicant from a stale saved-network
+    #    config. Stop it via upstart (a clean stop does NOT respawn) and clear
+    #    any stray supplicant so we own the radio for the dash session.
+    initctl stop wifid 2>/dev/null || pkill -f '/usr/bin/wifid' 2>/dev/null
+    pkill -f wpa_supplicant 2>/dev/null
+    sleep 1
+
+    # 1. Load the wifi driver if not already loaded. Because framework/wifim is
+    #    gated off during dash boot, the driver is normally NOT loaded yet, so we
+    #    load it explicitly. Use modprobe so dependencies (cfg80211) resolve.
+    if ! grep -q '^ath6kl_sdio' /proc/modules 2>/dev/null; then
+        modprobe ath6kl_sdio recovery_enable=1 suspend_mode=1 \
+            board_data_file="$CALFILE" 2>/dev/null \
+            || insmod "$ATH6KL_MOD" recovery_enable=1 suspend_mode=1 \
+                board_data_file="$CALFILE" 2>/dev/null \
+            || { log "warn: could not load ath6kl_sdio"; return 1; }
+    fi
+
+    # 2. Wait for the wlan0 netdev to appear (driver ready).
+    i=0
+    while [ ! -e /sys/class/net/wlan0 ] && [ "$i" -lt 30 ]; do
+        sleep 1
+        i=$((i + 1))
+    done
+    if [ ! -e /sys/class/net/wlan0 ]; then
+        log "warn: wlan0 never appeared"
+        return 1
+    fi
+
+    # 3. Bring the link up BEFORE wpa_supplicant starts.  Skipping this left
+    #    the supplicant in INACTIVE (never scanned), so association timed out.
+    ifconfig wlan0 up 2>/dev/null
+
+    # 4. Start wpa_supplicant (netlink driver) pointing at our persistent config.
+    if [ ! -f "$SUP_PID" ] || ! kill -0 "$(cat "$SUP_PID" 2>/dev/null)" 2>/dev/null; then
+        mkdir -p /var/run/wpa_supplicant
+        /usr/bin/wpa_supplicant -B -P "$SUP_PID" \
+            -c "$SUP_CONF" -i wlan0 -D nl80211 2>/dev/null \
+            || { log "warn: wpa_supplicant start failed"; return 1; }
+    fi
+
+    # 5. Wait for association (wpa_supplicant connects to the AP).  Nudge a
+    #    rescan every few seconds so a slow probe doesn't stall the boot.
+    i=0
+    assoc=0
+    while [ "$i" -lt 30 ]; do
+        if wpa_cli -i wlan0 status 2>/dev/null | grep -q 'wpa_state=COMPLETED'; then
+            assoc=1
+            break
+        fi
+        if [ $((i % 6)) -eq 0 ]; then
+            wpa_cli -i wlan0 reassociate 2>/dev/null
+        fi
+        sleep 2
+        i=$((i + 2))
+    done
+    if [ "$assoc" -ne 1 ]; then
+        log "warn: wlan0 did not associate within 30s"
+    fi
+
+    # 6. DHCP on wlan0 if it doesn't already have an IP (retry, DHCP can be slow).
+    if ! ifconfig wlan0 2>/dev/null | grep -q 'inet '; then
+        retry=0
+        while [ "$retry" -lt 3 ] && ! ifconfig wlan0 2>/dev/null | grep -q 'inet '; do
+            udhcpc -i wlan0 -q -n -p /mnt/us/usbnet/run/udhcpc-wlan0.pid 2>/dev/null \
+                || log "warn: udhcpc on wlan0 failed (try $((retry + 1)))"
+            sleep 2
+            retry=$((retry + 1))
+        done
+    fi
+
+    # 7. Stock INPUT policy is DROP and only inbound usb0 is accepted, so wifi
+    #    ssh/ping would never arrive. Open wlan0 for dropbear + ping (idempotent).
+    iptables -C INPUT -i wlan0 -p tcp --dport 22 -j ACCEPT 2>/dev/null || \
+        iptables -A INPUT -i wlan0 -p tcp --dport 22 -j ACCEPT
+    iptables -C INPUT -i wlan0 -p icmp --icmp-type echo-request -j ACCEPT 2>/dev/null || \
+        iptables -A INPUT -i wlan0 -p icmp --icmp-type echo-request -j ACCEPT
+
+    log "wifi_up: $(ifconfig wlan0 2>/dev/null | grep -oE 'inet addr:[0-9.]+' | head -1)"
+}
+
+if [ ! -x "$DASH_BIN" ]; then
+    log "missing $DASH_BIN; nothing to do"
+    exit 1
+fi
+
+# Bring up net; USB/SSH is the guaranteed fallback transport, wifi is preferred
+# for a cable-free dash.
+net_up
+wifi_up
+
+log "rendering via $DASH_BIN"
+"$DASH_BIN"
+rc=$?
+log "dash binary returned ($rc)"
+exit "$rc"
