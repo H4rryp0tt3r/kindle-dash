@@ -1,0 +1,36 @@
+.DS_Store
+
+# Big stock binaries / source dumps -- kept on disk only
+/update_kindle_paperwhite_v2_5.12.2.2.bin
+/Kindle_src_5.12.2.2/
+/ota_extract/
+/backups/
+/*.img
+
+# Patched U-Boot is byte-for-byte regenerable from the tracked stock binary via
+# recovery/mk-patched-fastboot.py, so keep only the regenerated copy on disk.
+/recovery/uboot_diags2fastboot.bin
+
+# ---------------------------------------------------------------- Dash OS
+# Pinned inputs are committed as .gz twins, with SHA256SUMS recording the hash of
+# the RAW bytes -- the raw hash is what matters, because it is what gets dd-ed to
+# the device. The raw files stay on disk untracked so flashing needs no
+# decompression step.
+#
+# Exception: the e-ink firmware is ALREADY gzip, so it is tracked as it stands;
+# there is no second .gz layer (that produced the old default.fw.gz.gz).
+#
+# Raw twins of the gzipped pinned inputs:
+/base-kernel/main-uImage
+/base-diag/diag-uImage
+/third-party/busybox/busybox
+/third-party/runit/runit
+
+# Build outputs are NOT committed. A tagged commit plus the pinned inputs IS the
+# version; `make build` regenerates these from overlay/ + src/ + the pins. This
+# is what keeps a 64 MiB rootfs image out of git.
+/build/
+/artifacts/
+
+# Python bytecode from the fastboot helper
+__pycache__/

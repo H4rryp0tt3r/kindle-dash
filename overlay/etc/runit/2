@@ -1,0 +1,20 @@
+#!/bin/busybox sh
+# Dash OS 0.1.0 -- /etc/runit/2 (stage 2)
+#
+# Supervise /service. This must NOT return: if it does, runit runs stage 3 and
+# the system shuts down.
+#
+# Uses busybox's runsvdir rather than the standalone one. The standalone
+# runsvdir/runsv shipped alongside runit are built for VFPv4 with fused
+# multiply-add, and this CPU (i.MX6SL, Cortex-A9, VFPv3-D16) does not implement
+# that -- runsvdir died with an illegal instruction about a second in, taking
+# the service tree with it. `runit` itself (PID 1) is clean, which is why stage
+# 1 always succeeded and the failure looked like a panel problem.
+#
+# busybox provides runsvdir/runsv/sv built for VFPv2, and busybox already runs
+# the whole of stage 1, so it is proven on this hardware. PATH is set because
+# busybox runsvdir finds `runsv` through it, and `busybox --install -s /bin` in
+# stage 1 is what creates /bin/runsv.
+PATH=/sbin:/bin:/usr/sbin:/usr/bin
+export PATH
+exec /bin/busybox runsvdir /service

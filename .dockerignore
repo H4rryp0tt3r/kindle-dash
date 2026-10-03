@@ -1,0 +1,3 @@
+# The build context carries nothing the image needs beyond the Containerfile
+# itself, which the builder reads directly.
+*

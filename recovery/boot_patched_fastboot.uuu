@@ -1,0 +1,19 @@
+uuu_version 1.0.1
+
+# Reach USB fastboot while IDME bootmode == "diags".
+#
+# uboot_diags2fastboot.bin is the stock U-Boot with the 18-byte
+# "run bootcmd_diags" string replaced by "fastboot", so the diags branch calls
+# fastboot instead of `bootm 0xE41000`. Regenerate it with:
+#
+#     python3 mk-patched-fastboot.py
+#
+# Mechanism, and why the stock U-Boot cannot work here: docs/DEVICE.md,
+# Appendix A. No eMMC/IDME write -- this only changes the U-Boot the ROM loads
+# into OCRAM.
+#
+# Once the device enumerates as 1949:d0e0, finish the job over fastboot:
+#
+#     python3.14 fastboot-setvar-reboot.py main
+#
+SDP: boot -f uboot_diags2fastboot.bin

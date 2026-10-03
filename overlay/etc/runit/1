@@ -1,0 +1,43 @@
+#!/bin/busybox sh
+# Dash OS 0.1.0 -- /etc/runit/1 (stage 1, run by runit as PID 1)
+#
+# Bring the machine up far enough for services to run, then exit. runit then
+# runs stage 2, which supervises /service.
+#
+# This deliberately does NOT paint the panel. Painting is the dashboard
+# service's job, so there is exactly one place in the system that touches the
+# e-ink framebuffer. Stage 1 only makes the machine usable.
+#
+# NO raw-LBA writes of any kind. There used to be a system of progress markers
+# written to absolute sectors below p1, and its LBAs overlapped the main kernel
+# image, silently corrupting the kernel that boots this whole thing. Nothing
+# here writes outside the filesystem.
+#
+# Progress is recorded two ways instead:
+#   * /var/log/dash.log on the rootfs -- persistent and readable from the Mac
+#     (macOS mounts p1 read-only at /Volumes/dash-root while the device is in
+#     diags), so a failed boot can be diagnosed without any custom protocol.
+#   * the panel, via the dashboard service.
+
+/bin/busybox --install -s /bin
+
+# Mounts first, before anything is logged. /var/log itself is a plain directory
+# on the ext3 rootfs and needs no mount -- but log() reads /proc/uptime for its
+# timestamp, so logging before /proc exists produces a blank timestamp.
+mount -t proc     proc     /proc
+mount -t sysfs    sysfs    /sys
+mount -t devtmpfs devtmpfs /dev
+mount -t tmpfs    tmpfs    /var/run
+
+log() {
+	echo "$(cut -d. -f1 /proc/uptime 2>/dev/null)s  stage1: $*" >>/var/log/dash.log
+}
+
+log "start, mounts up (proc sys dev, tmpfs on /var/run)"
+
+# Keep the EPDC powered between updates. The probe default (pwrdown_delay=0)
+# power-cycles the panel after every update, which corrupts a stream of updates.
+echo -1 > /sys/devices/platform/imx_epdc_fb/mxc_epdc_pwrdown 2>/dev/null
+log "mxc_epdc_pwrdown=$(cat /sys/devices/platform/imx_epdc_fb/mxc_epdc_pwrdown 2>/dev/null)"
+
+log "done, handing to stage 2"

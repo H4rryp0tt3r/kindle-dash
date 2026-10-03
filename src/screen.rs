@@ -1,0 +1,462 @@
+/*
+ * screen -- Dash OS text renderer for the Kindle PW2 (wario) EPDC.
+ *
+ * Reads a text file and paints it onto /dev/fb0 with an 8x8 bitmap font at
+ * scale 2, then performs one full-screen GC16 update and waits for it. Each
+ * call re-reads the file and repaints the whole surface, so the last frame on
+ * the panel is always the newest text.
+ *
+ * Usage: screen <file>
+ *
+ * UPDATE PARAMETERS ARE CONSERVATIVE ON PURPOSE: hist_bw=0, hist_gray=0,
+ * temp=0. These are the only parameters measured to work on this device. The
+ * automatic-temperature path (temp=TEMP_USE_AUTO plus the histogram waveform
+ * modes) caused a panel update that never returned when it was tried here, so
+ * it is not used. Do not switch this back to "auto" without markers or a log
+ * proving it returns.
+ *
+ * The ioctl ABI is copied verbatim from the 3.0.35 lab126 headers
+ * (include/linux/mxcfb.h, include/linux/fb.h) so the command codes and struct
+ * layouts always match the running driver:
+ *   MXCFB_SEND_UPDATE             = _IOW ('F', 0x2E, mxcfb_update_data)          0x4048462E
+ *   MXCFB_WAIT_FOR_UPDATE_COMPLETE = _IOWR('F', 0x2F, mxcfb_update_marker_data)  0xC008462F
+ * The struct sizes are asserted at compile time below; if a field is added or
+ * reordered the build fails here rather than corrupting the ioctl on the device.
+ *
+ * No external crates: the syscalls are declared by hand so the build needs
+ * nothing but rustc, stays offline, and has no lockfile to drift.
+ *
+ * Build (cross, static): rustc -O --edition 2021 \
+ *   --target arm-unknown-linux-gnueabi \
+ *   -C linker=arm-linux-gnueabi-gcc -C target-feature=+crt-static \
+ *   -o screen screen.rs
+ */
+use std::env;
+use std::ffi::c_void;
+use std::fs::File;
+use std::io::{self, Read, Write};
+use std::process::exit;
+use std::slice;
+
+const MXCFB_SEND_UPDATE: u32 = 0x4048_462E;
+const MXCFB_WAIT_FOR_UPDATE_COMPLETE: u32 = 0xC008_462F;
+const FBIOGET_VSCREENINFO: u32 = 0x4600;
+const FBIOGET_FSCREENINFO: u32 = 0x4602;
+
+const O_RDWR: i32 = 0o2;
+const PROT_READ: i32 = 0x1;
+const PROT_WRITE: i32 = 0x2;
+const MAP_SHARED: i32 = 0x1;
+
+const UPDATE_MODE_FULL: u32 = 0x1;
+const WAVEFORM_MODE_GC16: u32 = 0x2;
+
+// Only the handful of libc entry points this program needs. c_ulong is 32-bit
+// on armel, so the ioctl request codes are u32 here (0xC008462F does not fit in
+// an i32 without becoming negative).
+extern "C" {
+    fn open(path: *const u8, flags: i32, ...) -> i32;
+    fn close(fd: i32) -> i32;
+    fn mmap(addr: *mut c_void, len: usize, prot: i32, flags: i32, fd: i32, off: i64)
+        -> *mut c_void;
+    fn munmap(addr: *mut c_void, len: usize) -> i32;
+    fn ioctl(fd: i32, request: u32, ...) -> i32;
+}
+
+// These mirror the kernel ABI verbatim. Only a handful of fields are ever read;
+// the rest must be present so the offsets the driver writes land correctly.
+#[allow(dead_code)]
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct FbBitfield {
+    offset: u32,
+    length: u32,
+    msb_right: u32,
+}
+
+#[allow(dead_code)]
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct FbVarScreeninfo {
+    xres: u32,
+    yres: u32,
+    xres_virtual: u32,
+    yres_virtual: u32,
+    xoffset: u32,
+    yoffset: u32,
+    bits_per_pixel: u32,
+    grayscale: u32,
+    red: FbBitfield,
+    green: FbBitfield,
+    blue: FbBitfield,
+    transp: FbBitfield,
+    nonstd: u32,
+    activate: u32,
+    height: u32,
+    width: u32,
+    accel_flags: u32,
+    pixclock: u32,
+    left_margin: u32,
+    right_margin: u32,
+    upper_margin: u32,
+    lower_margin: u32,
+    hsync_len: u32,
+    vsync_len: u32,
+    sync: u32,
+    vmode: u32,
+    rotate: u32,
+    colorspace: u32,
+    reserved: [u32; 4],
+}
+
+#[allow(dead_code)]
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct FbFixScreeninfo {
+    id: [u8; 16],
+    smem_start: u32,
+    smem_len: u32,
+    type_: u32,
+    type_aux: u32,
+    visual: u32,
+    xpanstep: u16,
+    ypanstep: u16,
+    ywrapstep: u16,
+    line_length: u32,
+    mmio_start: u32,
+    mmio_len: u32,
+    accel: u32,
+    capabilities: u16,
+    reserved: [u16; 2],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct MxcfbRect {
+    top: u32,
+    left: u32,
+    width: u32,
+    height: u32,
+}
+
+#[allow(dead_code)]
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct MxcfbAltBufferData {
+    phys_addr: u32,
+    width: u32,
+    height: u32,
+    alt_update_region: MxcfbRect,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct MxcfbUpdateData {
+    update_region: MxcfbRect,
+    waveform_mode: u32,
+    update_mode: u32,
+    update_marker: u32,
+    hist_bw_waveform_mode: u32,
+    hist_gray_waveform_mode: u32,
+    temp: i32,
+    flags: u32,
+    alt_buffer_data: MxcfbAltBufferData,
+}
+
+// The ioctl payloads are memcpy-ed to the kernel; a layout mistake would be a
+// silent memory-corruption bug on the device, so pin the sizes.
+const _: () = {
+    assert!(core::mem::size_of::<MxcfbRect>() == 16);
+    assert!(core::mem::size_of::<MxcfbAltBufferData>() == 28);
+    assert!(core::mem::size_of::<MxcfbUpdateData>() == 72);
+    assert!(core::mem::size_of::<FbVarScreeninfo>() == 160);
+    assert!(core::mem::size_of::<FbFixScreeninfo>() == 68);
+};
+
+/* 8x8 bitmap font (public domain font8x8), ASCII 0x20..0x7E */
+static FONT: [[u8; 8]; 95] = [
+    [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],  /* ' ' */
+    [0x18, 0x3C, 0x3C, 0x18, 0x18, 0x00, 0x18, 0x00],
+    [0x36, 0x36, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+    [0x36, 0x36, 0x7F, 0x36, 0x7F, 0x36, 0x36, 0x00],
+    [0x0C, 0x3E, 0x03, 0x1E, 0x30, 0x1F, 0x0C, 0x00],
+    [0x00, 0x63, 0x33, 0x18, 0x0C, 0x66, 0x63, 0x00],
+    [0x1C, 0x36, 0x1C, 0x6E, 0x3B, 0x33, 0x6E, 0x00],
+    [0x06, 0x06, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00],
+    [0x18, 0x0C, 0x06, 0x06, 0x06, 0x0C, 0x18, 0x00],
+    [0x06, 0x0C, 0x18, 0x18, 0x18, 0x0C, 0x06, 0x00],
+    [0x00, 0x66, 0x3C, 0xFF, 0x3C, 0x66, 0x00, 0x00],
+    [0x00, 0x0C, 0x0C, 0x3F, 0x0C, 0x0C, 0x00, 0x00],
+    [0x00, 0x00, 0x00, 0x00, 0x00, 0x0C, 0x0C, 0x06],
+    [0x00, 0x00, 0x00, 0x3F, 0x00, 0x00, 0x00, 0x00],
+    [0x00, 0x00, 0x00, 0x00, 0x00, 0x0C, 0x0C, 0x00],
+    [0x60, 0x30, 0x18, 0x0C, 0x06, 0x03, 0x01, 0x00],
+    [0x3E, 0x63, 0x73, 0x7B, 0x6F, 0x67, 0x3E, 0x00],
+    [0x0C, 0x0E, 0x0C, 0x0C, 0x0C, 0x0C, 0x3F, 0x00],
+    [0x1E, 0x33, 0x30, 0x1C, 0x06, 0x33, 0x3F, 0x00],
+    [0x1E, 0x33, 0x30, 0x1C, 0x30, 0x33, 0x1E, 0x00],
+    [0x38, 0x3C, 0x36, 0x33, 0x7F, 0x30, 0x78, 0x00],
+    [0x3F, 0x03, 0x1F, 0x30, 0x30, 0x33, 0x1E, 0x00],
+    [0x1C, 0x06, 0x03, 0x1F, 0x33, 0x33, 0x1E, 0x00],
+    [0x3F, 0x33, 0x30, 0x18, 0x0C, 0x0C, 0x0C, 0x00],
+    [0x1E, 0x33, 0x33, 0x1E, 0x33, 0x33, 0x1E, 0x00],
+    [0x1E, 0x33, 0x33, 0x3E, 0x30, 0x18, 0x0E, 0x00],
+    [0x00, 0x0C, 0x0C, 0x00, 0x00, 0x0C, 0x0C, 0x00],
+    [0x00, 0x0C, 0x0C, 0x00, 0x00, 0x0C, 0x0C, 0x06],
+    [0x18, 0x0C, 0x06, 0x03, 0x06, 0x0C, 0x18, 0x00],
+    [0x00, 0x00, 0x3F, 0x00, 0x00, 0x3F, 0x00, 0x00],
+    [0x06, 0x0C, 0x18, 0x30, 0x18, 0x0C, 0x06, 0x00],
+    [0x1E, 0x33, 0x30, 0x18, 0x0C, 0x00, 0x0C, 0x00],
+    [0x3E, 0x63, 0x7B, 0x7B, 0x7B, 0x03, 0x1E, 0x00],
+    [0x0C, 0x1E, 0x33, 0x33, 0x3F, 0x33, 0x33, 0x00],
+    [0x3F, 0x66, 0x66, 0x3E, 0x66, 0x66, 0x3F, 0x00],
+    [0x3C, 0x66, 0x03, 0x03, 0x03, 0x66, 0x3C, 0x00],
+    [0x1F, 0x36, 0x66, 0x66, 0x66, 0x36, 0x1F, 0x00],
+    [0x7F, 0x46, 0x16, 0x1E, 0x16, 0x46, 0x7F, 0x00],
+    [0x7F, 0x46, 0x16, 0x1E, 0x16, 0x06, 0x0F, 0x00],
+    [0x3C, 0x66, 0x03, 0x03, 0x73, 0x66, 0x7C, 0x00],
+    [0x33, 0x33, 0x33, 0x3F, 0x33, 0x33, 0x33, 0x00],
+    [0x1E, 0x0C, 0x0C, 0x0C, 0x0C, 0x0C, 0x1E, 0x00],
+    [0x78, 0x30, 0x30, 0x30, 0x33, 0x33, 0x1E, 0x00],
+    [0x67, 0x66, 0x36, 0x1E, 0x36, 0x66, 0x67, 0x00],
+    [0x0F, 0x06, 0x06, 0x06, 0x46, 0x66, 0x7F, 0x00],
+    [0x63, 0x77, 0x7F, 0x7F, 0x6B, 0x63, 0x63, 0x00],
+    [0x63, 0x67, 0x6F, 0x7B, 0x73, 0x63, 0x63, 0x00],
+    [0x1C, 0x36, 0x63, 0x63, 0x63, 0x36, 0x1C, 0x00],
+    [0x3F, 0x66, 0x66, 0x3E, 0x06, 0x06, 0x0F, 0x00],
+    [0x1E, 0x33, 0x33, 0x33, 0x3B, 0x1E, 0x38, 0x00],
+    [0x3F, 0x66, 0x66, 0x3E, 0x36, 0x66, 0x67, 0x00],
+    [0x1E, 0x33, 0x07, 0x0E, 0x38, 0x33, 0x1E, 0x00],
+    [0x3F, 0x2D, 0x0C, 0x0C, 0x0C, 0x0C, 0x1E, 0x00],
+    [0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0x3F, 0x00],
+    [0x33, 0x33, 0x33, 0x33, 0x33, 0x1E, 0x0C, 0x00],
+    [0x63, 0x63, 0x63, 0x6B, 0x7F, 0x77, 0x63, 0x00],
+    [0x63, 0x63, 0x36, 0x1C, 0x1C, 0x36, 0x63, 0x00],
+    [0x33, 0x33, 0x33, 0x1E, 0x0C, 0x0C, 0x1E, 0x00],
+    [0x7F, 0x63, 0x31, 0x18, 0x4C, 0x66, 0x7F, 0x00],
+    [0x1E, 0x06, 0x06, 0x06, 0x06, 0x06, 0x1E, 0x00],
+    [0x03, 0x06, 0x0C, 0x18, 0x30, 0x60, 0x40, 0x00],
+    [0x1E, 0x18, 0x18, 0x18, 0x18, 0x18, 0x1E, 0x00],
+    [0x08, 0x1C, 0x36, 0x63, 0x00, 0x00, 0x00, 0x00],
+    [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF],
+    [0x0C, 0x0C, 0x18, 0x00, 0x00, 0x00, 0x00, 0x00],
+    [0x00, 0x00, 0x1E, 0x30, 0x3E, 0x33, 0x6E, 0x00],
+    [0x07, 0x06, 0x06, 0x3E, 0x66, 0x66, 0x3B, 0x00],
+    [0x00, 0x00, 0x1E, 0x33, 0x03, 0x33, 0x1E, 0x00],
+    [0x38, 0x30, 0x30, 0x3e, 0x33, 0x33, 0x6E, 0x00],
+    [0x00, 0x00, 0x1E, 0x33, 0x3f, 0x03, 0x1E, 0x00],
+    [0x1C, 0x36, 0x06, 0x0f, 0x06, 0x06, 0x0F, 0x00],
+    [0x00, 0x00, 0x6E, 0x33, 0x33, 0x3E, 0x30, 0x1F],
+    [0x07, 0x06, 0x36, 0x6E, 0x66, 0x66, 0x67, 0x00],
+    [0x0C, 0x00, 0x0E, 0x0C, 0x0C, 0x0C, 0x1E, 0x00],
+    [0x30, 0x00, 0x30, 0x30, 0x30, 0x33, 0x33, 0x1E],
+    [0x07, 0x06, 0x66, 0x36, 0x1E, 0x36, 0x67, 0x00],
+    [0x0E, 0x0C, 0x0C, 0x0C, 0x0C, 0x0C, 0x1E, 0x00],
+    [0x00, 0x00, 0x33, 0x7F, 0x7F, 0x6B, 0x63, 0x00],
+    [0x00, 0x00, 0x1F, 0x33, 0x33, 0x33, 0x33, 0x00],
+    [0x00, 0x00, 0x1E, 0x33, 0x33, 0x33, 0x1E, 0x00],
+    [0x00, 0x00, 0x3B, 0x66, 0x66, 0x3E, 0x06, 0x0F],
+    [0x00, 0x00, 0x6E, 0x33, 0x33, 0x3E, 0x30, 0x78],
+    [0x00, 0x00, 0x3B, 0x6E, 0x66, 0x06, 0x0F, 0x00],
+    [0x00, 0x00, 0x3E, 0x03, 0x1E, 0x30, 0x1F, 0x00],
+    [0x08, 0x0C, 0x3E, 0x0C, 0x0C, 0x2C, 0x18, 0x00],
+    [0x00, 0x00, 0x33, 0x33, 0x33, 0x33, 0x6E, 0x00],
+    [0x00, 0x00, 0x33, 0x33, 0x33, 0x1E, 0x0C, 0x00],
+    [0x00, 0x00, 0x63, 0x6B, 0x7F, 0x7F, 0x36, 0x00],
+    [0x00, 0x00, 0x63, 0x36, 0x1C, 0x36, 0x63, 0x00],
+    [0x00, 0x00, 0x33, 0x33, 0x33, 0x3E, 0x30, 0x1F],
+    [0x00, 0x00, 0x3F, 0x19, 0x0C, 0x26, 0x3F, 0x00],
+    [0x38, 0x0C, 0x0C, 0x07, 0x0C, 0x0C, 0x38, 0x00],
+    [0x18, 0x18, 0x18, 0x00, 0x18, 0x18, 0x18, 0x00],
+    [0x07, 0x0C, 0x0C, 0x38, 0x0C, 0x0C, 0x07, 0x00],
+    [0x6E, 0x3B, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+];
+
+const MAX_LINES: usize = 40;
+const MAXLEN: usize = 62;
+
+fn die(m: &str) -> ! {
+    let e = io::Error::last_os_error();
+    let _ = writeln!(io::stderr(), "screen: {}: {}", m, e);
+    exit(1);
+}
+
+/// Read the frame the same way the C did: at most MAX_LINES records of at most
+/// MAXLEN bytes each, a record ending at the first newline within that window.
+/// A line longer than MAXLEN is therefore split into two records (it wraps),
+/// which is what fgets() with a 63-byte buffer did.
+fn read_records<R: Read>(mut r: R) -> Vec<Vec<u8>> {
+    let mut data = Vec::new();
+    // Only the first MAX_LINES records can ever be used, so bound the read.
+    let cap = (MAX_LINES * (MAXLEN + 1)) as u64;
+    let _ = r.by_ref().take(cap).read_to_end(&mut data);
+
+    let mut out = Vec::new();
+    let mut pos = 0usize;
+    while pos < data.len() && out.len() < MAX_LINES {
+        let start = pos;
+        while pos < data.len() && pos - start < MAXLEN {
+            let c = data[pos];
+            pos += 1;
+            if c == b'\n' {
+                break;
+            }
+        }
+        let mut rec = &data[start..pos];
+        // Strip trailing CR/LF, repeatedly (as the C loop did).
+        while let Some((&last, _)) = rec.split_last() {
+            if last == b'\n' || last == b'\r' {
+                rec = &rec[..rec.len() - 1];
+            } else {
+                break;
+            }
+        }
+        // strlen() stopped at the first NUL, so anything after it was invisible.
+        let nul = rec.iter().position(|&c| c == 0).unwrap_or(rec.len());
+        out.push(rec[..nul].to_vec());
+    }
+    out
+}
+
+fn main() {
+    let fb = unsafe { open(b"/dev/fb0\0".as_ptr(), O_RDWR) };
+    if fb < 0 {
+        die("open /dev/fb0");
+    }
+
+    let mut vi = FbVarScreeninfo::default();
+    let mut fi = FbFixScreeninfo::default();
+    if unsafe { ioctl(fb, FBIOGET_VSCREENINFO, &mut vi as *mut _ as *mut c_void) } < 0 {
+        die("FBIOGET_VSCREENINFO");
+    }
+    if unsafe { ioctl(fb, FBIOGET_FSCREENINFO, &mut fi as *mut _ as *mut c_void) } < 0 {
+        die("FBIOGET_FSCREENINFO");
+    }
+
+    let w = vi.xres as usize;
+    let h = vi.yres as usize;
+    let bpp = vi.bits_per_pixel as usize;
+    let stride = if fi.line_length != 0 {
+        fi.line_length as usize
+    } else {
+        w * ((bpp + 7) / 8)
+    };
+    let smem = if fi.smem_len != 0 {
+        fi.smem_len as usize
+    } else {
+        stride * h
+    };
+
+    let ptr = unsafe {
+        mmap(
+            std::ptr::null_mut(),
+            smem,
+            PROT_READ | PROT_WRITE,
+            MAP_SHARED,
+            fb,
+            0,
+        )
+    };
+    if ptr as isize == -1 {
+        die("mmap /dev/fb0");
+    }
+    // The mapping is owned by this process for the rest of main.
+    let fbp: &mut [u8] = unsafe { slice::from_raw_parts_mut(ptr as *mut u8, smem) };
+
+    // Read the report file (or stdin).
+    let lines = match env::args_os().nth(1) {
+        Some(path) => match File::open(path) {
+            Ok(f) => read_records(f),
+            Err(_) => die("open report"),
+        },
+        None => read_records(io::stdin().lock()),
+    };
+
+    // white background. The length is the VISIBLE width in bytes, not one byte
+    // per pixel: the driver stride (768) is wider than the panel (758), so
+    // filling only bytes-per-px per row would leave 767 of every 768 bytes at
+    // their power-on value of zero -- a black panel that still updates cleanly.
+    let fill = w * ((bpp + 7) / 8);
+    for y in 0..h {
+        let off = y * stride;
+        if let Some(row) = fbp.get_mut(off..off + fill) {
+            row.fill(0xFF);
+        }
+    }
+
+    // draw lines at scale 2
+    let scale = 2usize;
+    let x0 = 4isize;
+    let y0 = 4isize;
+    let charw = 8 * scale;
+    let rowh = 8 * scale;
+    for (i, line) in lines.iter().enumerate() {
+        for (c, &byte) in line.iter().enumerate() {
+            if c >= MAXLEN {
+                break;
+            }
+            let mut ch = byte;
+            if ch < 0x20 || ch > 0x7E {
+                ch = b' ';
+            }
+            let g = &FONT[(ch - 0x20) as usize];
+            for r in 0..8usize {
+                for b in 0..8usize {
+                    if ((g[r] >> b) & 1) == 0 {
+                        continue;
+                    }
+                    let px = x0 + c as isize * charw as isize + b as isize * scale as isize;
+                    let py = y0 + i as isize * (rowh as isize + 2) + r as isize * scale as isize;
+                    for s in 0..scale {
+                        let yy = py + s as isize;
+                        if yy >= h as isize {
+                            break;
+                        }
+                        let off = yy as usize * stride + px as usize;
+                        // NOTE: this writes scale BYTES, which assumes 1 byte per
+                        // pixel. Deliberately unguarded horizontally, exactly as
+                        // before: a line wider than (width-4)/(8*scale) = 47
+                        // characters runs past the visible width and into the next
+                        // row. Fixing that is a separate, visible change.
+                        if let Some(px_bytes) = fbp.get_mut(off..off + scale) {
+                            px_bytes.fill(0x00);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let mut upd = MxcfbUpdateData {
+        update_region: MxcfbRect {
+            top: 0,
+            left: 0,
+            width: w as u32,
+            height: h as u32,
+        },
+        waveform_mode: WAVEFORM_MODE_GC16,
+        update_mode: UPDATE_MODE_FULL,
+        update_marker: 1,
+        hist_bw_waveform_mode: 0,
+        hist_gray_waveform_mode: 0,
+        temp: 0,
+        flags: 0,
+        alt_buffer_data: MxcfbAltBufferData::default(),
+    };
+
+    if unsafe { ioctl(fb, MXCFB_SEND_UPDATE, &mut upd as *mut _ as *mut c_void) } < 0 {
+        let e = io::Error::last_os_error();
+        let _ = writeln!(io::stderr(), "SEND_UPDATE: {}", e);
+    } else {
+        let mut m = upd.update_marker;
+        if unsafe { ioctl(fb, MXCFB_WAIT_FOR_UPDATE_COMPLETE, &mut m as *mut _ as *mut c_void) } < 0 {
+            let e = io::Error::last_os_error();
+            let _ = writeln!(io::stderr(), "WAIT: {}", e);
+        }
+    }
+
+    unsafe {
+        munmap(ptr, smem);
+        close(fb);
+    }
+}
