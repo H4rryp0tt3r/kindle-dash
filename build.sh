@@ -272,6 +272,7 @@ cmd_test() {
 	local SRC=${1:?usage: build.sh test <srcdir>}
 	SRC=$(cd "$SRC" && pwd)
 	command -v podman >/dev/null || { echo "podman required" >&2; exit 1; }
+	mkdir -p "$HERE/build"
 
 	echo "=== test: $SRC/*.rs ==="
 	COPYFILE_DISABLE=1 tar -C "$SRC" -cf - --no-xattrs . \
