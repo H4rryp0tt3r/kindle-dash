@@ -1,0 +1,104 @@
+# CI: every PR, and every push to main.
+#
+# Three required checks, deliberately separate so a failure names itself:
+#   changelog  the Unreleased section has been filled in
+#   test       rustc --test unit tests
+#   build      a real rootfs, plus its content fingerprint
+#
+# `build` needs the private pins repo, so it needs DASH_PINS_TOKEN. GitHub does
+# not pass secrets to pull_request events from FORKS -- which is the correct
+# behaviour, and it means a fork PR cannot be released until it is brought into
+# this repository. The job says so plainly instead of failing obscurely.
+name: ci
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changelog:
+    name: changelog
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: the Unreleased section must not still be the placeholder
+        run: |
+          if [ ! -f CHANGELOG.md ]; then
+            echo "::error::CHANGELOG.md is missing"; exit 1
+          fi
+          if grep -q '<!-- CHANGELOG-PLACEHOLDER -->' CHANGELOG.md; then
+            echo "::error::CHANGELOG.md's Unreleased section still contains the placeholder. Replace it with what this PR changes, or the PR cannot merge."
+            exit 1
+          fi
+          echo "Unreleased section is filled in."
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: cache the build image
+        uses: actions/cache@v4
+        with:
+          path: /tmp/dash-build-image.tar
+          key: dash-build-${{ hashFiles('Containerfile') }}
+      - name: provide the build environment
+        run: |
+          set -euo pipefail
+          TAG=$( (sha256sum Containerfile || shasum -a 256 Containerfile) | cut -c1-12 )
+          if [ -f /tmp/dash-build-image.tar ]; then
+            podman load -i /tmp/dash-build-image.tar
+            podman tag "localhost/dash-build:$TAG" "localhost/dash-build:$TAG" 2>/dev/null || true
+          fi
+          make env
+          podman save "localhost/dash-build:$TAG" -o /tmp/dash-build-image.tar
+      - run: make test
+
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: cache the build image
+        uses: actions/cache@v4
+        with:
+          path: /tmp/dash-build-image.tar
+          key: dash-build-${{ hashFiles('Containerfile') }}
+      - name: provide the build environment
+        run: |
+          set -euo pipefail
+          TAG=$( (sha256sum Containerfile || shasum -a 256 Containerfile) | cut -c1-12 )
+          if [ -f /tmp/dash-build-image.tar ]; then
+            podman load -i /tmp/dash-build-image.tar
+          fi
+          make env
+      - name: fetch the pinned binary inputs
+        env:
+          DASH_PINS_TOKEN: ${{ secrets.DASH_PINS_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DASH_PINS_TOKEN:-}" ]; then
+            echo "::error::DASH_PINS_TOKEN is not available to this event. A pull request from a fork cannot build: it needs the private pins repo. Push the branch to this repository and reopen the PR."
+            exit 1
+          fi
+          make pins
+      - name: build the rootfs and fingerprint it
+        run: |
+          make build
+          make fingerprint | tee /tmp/fingerprint.txt
+      - name: upload the fingerprint
+        uses: actions/upload-artifact@v4
+        with:
+          name: rootfs-fingerprint
+          path: /tmp/fingerprint.txt

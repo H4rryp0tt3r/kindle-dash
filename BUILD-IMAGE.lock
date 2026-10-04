@@ -1,1 +1,5 @@
-73521ca50df05c90b56a69c0ebc7b36ae8e2fff7e206fe25e4cf775fb6dcf001
+image: ghcr.io/h4rryp0tt3r/dash-build
+tag: f44dea91d046
+published: no
+digest: sha256:63b0773ae8ebbc92e232f604f0a8100dcd0460150dc7fe5b6a82f6e6a8d53fc1
+id: ff3d77447321962281962e1f8499adf56a9676c8ff3767ad514b5e6c6d94d816
