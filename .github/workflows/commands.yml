@@ -49,7 +49,11 @@ jobs:
             *"!release-patch"*)                    cmd=release; intent=patch ;;
             *"!release-minor"*)                    cmd=release; intent=minor ;;
             *"!release-major"*)                    cmd=release; intent=major ;;
-            *) echo "no command in comment; nothing to do"; exit 0 ;;
+            *)
+              echo "::notice::no release command in this comment; nothing to do"
+              echo "cmd="      >> "$GITHUB_OUTPUT"
+              echo "intent="   >> "$GITHUB_OUTPUT"
+              exit 0 ;;
           esac
           echo "cmd=$cmd"    >> "$GITHUB_OUTPUT"
           echo "intent=$intent" >> "$GITHUB_OUTPUT"
