@@ -1,5 +1,5 @@
 #!/bin/busybox sh
-# Dash OS 0.1.0 -- /etc/runit/1 (stage 1, run by runit as PID 1)
+# Dash OS -- /etc/runit/1 (stage 1, run by runit as PID 1)
 #
 # Bring the machine up far enough for services to run, then exit. runit then
 # runs stage 2, which supervises /service.

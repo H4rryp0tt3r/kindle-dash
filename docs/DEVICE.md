@@ -100,7 +100,8 @@ exports the whole disk and macOS auto-mounts p1 at `/Volumes/dash-root`.
 
 ## Appendix A — bootmode / IDME, verified from the binary
 
-Read from `recovery/uboot_2009-08-lab126_wario_usb_fastboot.bin` (md5
+Read from `recovery/uboot_2009-08-lab126_wario_usb_fastboot.bin` (materialised
+by `make pins` from the private pins repo; md5
 `f8f89650f725431d791c4698864c9690`, 119652 B, `TEXT_BASE = 0x00980000`).
 
 The lab126 U-Boot is a normal U-Boot whose default env is already:

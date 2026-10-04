@@ -1,5 +1,5 @@
 #!/bin/busybox sh
-# Dash OS 0.1.0 -- /etc/runit/2 (stage 2)
+# Dash OS -- /etc/runit/2 (stage 2)
 #
 # Supervise /service. This must NOT return: if it does, runit runs stage 3 and
 # the system shuts down.

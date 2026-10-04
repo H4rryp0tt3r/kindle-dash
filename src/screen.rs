@@ -318,6 +318,37 @@ fn read_records<R: Read>(mut r: R) -> Vec<Vec<u8>> {
     out
 }
 
+/// Bytes of a row that must be whitened: the VISIBLE width scaled to bytes per
+/// pixel -- NOT one byte per pixel.
+///
+/// The driver stride (768) is wider than the panel (758), so filling only
+/// bytes-per-px per row leaves 767 of every 768 bytes at their power-on value
+/// of zero: a black panel that still sends its update cleanly and still exits 0.
+/// This is the whole reason `fill_len` exists and is unit-tested.
+fn fill_len(w: usize, bpp: usize) -> usize {
+    w * ((bpp + 7) / 8)
+}
+
+/// The 8x8 glyph for a byte, substituting space for anything unprintable --
+/// which is what the C's `if (ch < 0x20 || ch > 0x7E) ch = ' ';` did.
+fn glyph(ch: u8) -> &'static [u8; 8] {
+    let ch = if ch < 0x20 || ch > 0x7E { b' ' } else { ch };
+    &FONT[(ch - 0x20) as usize]
+}
+
+/// Characters that fit on one row without running past the visible width.
+///
+/// DELIBERATELY NOT ENFORCED. The renderer has always been allowed to run past
+/// this into the next row (see the draw loop), so this is documentation with a
+/// tripwire on the geometry, not new clamping.
+fn visible_chars(w: usize, scale: usize, x0: isize) -> usize {
+    let x0u = x0.max(0) as usize;
+    if w <= x0u {
+        return 0;
+    }
+    (w - x0u) / (8 * scale)
+}
+
 fn main() {
     let fb = unsafe { open(b"/dev/fb0\0".as_ptr(), O_RDWR) };
     if fb < 0 {
@@ -372,11 +403,8 @@ fn main() {
         None => read_records(io::stdin().lock()),
     };
 
-    // white background. The length is the VISIBLE width in bytes, not one byte
-    // per pixel: the driver stride (768) is wider than the panel (758), so
-    // filling only bytes-per-px per row would leave 767 of every 768 bytes at
-    // their power-on value of zero -- a black panel that still updates cleanly.
-    let fill = w * ((bpp + 7) / 8);
+    // White background. See fill_len: this is the visible row width in bytes.
+    let fill = fill_len(w, bpp);
     for y in 0..h {
         let off = y * stride;
         if let Some(row) = fbp.get_mut(off..off + fill) {
@@ -395,11 +423,7 @@ fn main() {
             if c >= MAXLEN {
                 break;
             }
-            let mut ch = byte;
-            if ch < 0x20 || ch > 0x7E {
-                ch = b' ';
-            }
-            let g = &FONT[(ch - 0x20) as usize];
+            let g = glyph(byte);
             for r in 0..8usize {
                 for b in 0..8usize {
                     if ((g[r] >> b) & 1) == 0 {
@@ -458,5 +482,124 @@ fn main() {
     unsafe {
         munmap(ptr, smem);
         close(fb);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- background fill -------------------------------------------------
+    // The regression that cost a device cycle: the fill was bytes-per-pixel per
+    // row instead of the visible row width in bytes. The panel came up black,
+    // sent its update cleanly, and exited 0, so nothing on the device said so.
+
+    #[test]
+    fn fill_is_the_visible_row_in_bytes() {
+        assert_eq!(fill_len(758, 8), 758);
+        assert_eq!(fill_len(1024, 8), 1024);
+        assert_eq!(fill_len(758, 16), 1516);
+        // The panel is 8bpp, where this is exact. Below 8bpp the C's formula
+        // (width x whole-bytes-per-pixel) over-fills rather than under-fills,
+        // which is harmless: it whitens into the stride gutter.
+        assert_eq!(fill_len(8, 1), 8);
+        assert_eq!(fill_len(9, 1), 9);
+        // 4bpp packs two pixels per byte, but the formula still multiplies out to
+        // one byte per pixel -- preserved deliberately, it is what the C did.
+        assert_eq!(fill_len(100, 4), 100);
+    }
+
+    #[test]
+    fn fill_does_not_depend_on_stride() {
+        // The panel: 758 visible, 768 stride. The 10-byte gutter must be left
+        // alone, and every visible byte whitened. The buggy version returned 1.
+        let (w, stride, bpp) = (758usize, 768usize, 8usize);
+        assert_eq!(fill_len(w, bpp), w);
+        assert!(fill_len(w, bpp) < stride);
+    }
+
+    // ---- font ------------------------------------------------------------
+
+    #[test]
+    fn glyph_maps_printable_ascii_into_the_font() {
+        assert_eq!(FONT.len(), 95);
+        assert_eq!(glyph(b' ').as_ptr(), FONT[0].as_ptr());
+        assert_eq!(glyph(b'A').as_ptr(), FONT[(b'A' - 0x20) as usize].as_ptr());
+        assert_eq!(glyph(b'~').as_ptr(), FONT[94].as_ptr());
+    }
+
+    #[test]
+    fn glyph_substitutes_space_outside_printable_ascii() {
+        for ch in [0x00u8, 0x01, 0x1F, 0x7F, 0x80, 0xFF] {
+            assert_eq!(glyph(ch).as_ptr(), glyph(b' ').as_ptr(), "ch {:#04x}", ch);
+        }
+    }
+
+    // ---- geometry --------------------------------------------------------
+
+    #[test]
+    fn visible_chars_is_47_on_the_panel() {
+        // Documentation, not enforcement -- see visible_chars.
+        assert_eq!(visible_chars(758, 2, 4), 47);
+        assert_eq!(visible_chars(1024, 2, 4), 63);
+        assert_eq!(visible_chars(4, 2, 4), 0);
+    }
+
+    // ---- record reading (fgets semantics) --------------------------------
+
+    #[test]
+    fn records_split_on_newline() {
+        let r = read_records(&b"hello\nworld\n"[..]);
+        assert_eq!(r, vec![b"hello".to_vec(), b"world".to_vec()]);
+    }
+
+    #[test]
+    fn records_keep_a_final_unterminated_line() {
+        assert_eq!(read_records(&b"abc"[..]), vec![b"abc".to_vec()]);
+    }
+
+    #[test]
+    fn records_strip_trailing_crlf_repeatedly() {
+        assert_eq!(read_records(&b"hi\r\n"[..]), vec![b"hi".to_vec()]);
+        // A bare CRLF is its OWN record, and an empty one. fgets() read "hi\n"
+        // and then stopped at the next newline, so the leftover "\r\n" became a
+        // second, blank line rather than being folded into the first.
+        assert_eq!(
+            read_records(&b"hi\n\r\n"[..]),
+            vec![b"hi".to_vec(), Vec::new()]
+        );
+        assert_eq!(
+            read_records(&b"a\n\nb\n"[..]),
+            vec![b"a".to_vec(), Vec::new(), b"b".to_vec()]
+        );
+    }
+
+    #[test]
+    fn records_truncate_at_the_first_nul() {
+        // strlen() stopped at NUL, so nothing after it was ever visible.
+        assert_eq!(read_records(&b"ab\0cd\n"[..]), vec![b"ab".to_vec()]);
+    }
+
+    #[test]
+    fn records_wrap_at_maxlen_like_fgets() {
+        // fgets() with a 63-byte buffer turned a 100-char line into 62 + 38.
+        let long = vec![b'x'; 100];
+        let mut data = long.clone();
+        data.push(b'\n');
+        let r = read_records(&data[..]);
+        assert_eq!(r.len(), 2);
+        assert_eq!(r[0].len(), MAXLEN);
+        assert_eq!(r[1].len(), 100 - MAXLEN);
+    }
+
+    #[test]
+    fn records_cap_at_max_lines() {
+        let data = b"line\n".repeat(MAX_LINES + 10);
+        assert_eq!(read_records(&data[..]).len(), MAX_LINES);
+    }
+
+    #[test]
+    fn records_of_empty_input_is_empty() {
+        assert!(read_records(&b""[..]).is_empty());
     }
 }

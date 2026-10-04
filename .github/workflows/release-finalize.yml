@@ -1,0 +1,187 @@
+# Post-merge release finalisation.
+#
+# Triggered by the push to main that a `!release-*` squash-merge produces. The
+# squash commit carries `Release-Intent:`, and THIS is where the version number
+# actually changes:
+#
+#   1. bail out unless this push is a release commit (or is a bump commit)
+#   2. compute the version, and cross-check the merge's own arithmetic
+#   3. fetch the pinned binaries, and record the exact pins SHA used
+#   4. move Unreleased -> <version> in CHANGELOG.md, bump VERSION, commit, push
+#   5. build the rootfs and fingerprint it
+#   6. tag the pins repo AND this repo at <version>
+#
+# Step 4 before step 5 on purpose: /etc/dash-release inside the rootfs is
+# generated from VERSION, so the artifact has to be built from the bumped tree.
+# Step 6 after step 5 on purpose: never tag a build that has not been made.
+#
+# The bump commit pushes to main, which re-triggers this workflow. Its message
+# ends `[skip-bump]` and step 1 stops the loop; without that guard the bump
+# would bump itself forever.
+name: release-finalize
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-finalize
+  cancel-in-progress: false
+
+jobs:
+  finalize:
+    name: finalize
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: is this a release commit, and not a bump commit?
+        id: kind
+        run: |
+          set -euo pipefail
+          git log -1 --format=%B > /tmp/msg
+          if python3 .github/scripts/release.py guard-bump --message-file /tmp/msg; then
+            echo "kind=bump"; echo "::notice::this push is the release bump commit; nothing to do"
+            echo "kind=bump" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          intent=$(python3 .github/scripts/release.py intent --message-file /tmp/msg) \
+            || { echo "kind=none"; echo "kind=none" >> "$GITHUB_OUTPUT"; exit 0; }
+          echo "kind=release" >> "$GITHUB_OUTPUT"
+          echo "intent=$intent" >> "$GITHUB_OUTPUT"
+          echo "release commit: intent=$intent"
+
+      - name: compute the version, and check it against the merge's own claim
+        if: steps.kind.outputs.kind == 'release'
+        id: ver
+        run: |
+          set -euo pipefail
+          intent="${{ steps.kind.outputs.intent }}"
+          version=$(python3 .github/scripts/release.py next-version \
+            --current "$(cat VERSION)" --intent "$intent")
+          planned=$(sed -n 's/^Planned-Version: //p' /tmp/msg | head -1)
+          if [ -n "$planned" ] && [ "$planned" != "$version" ]; then
+            echo "::error::the merge planned $planned but the arithmetic says $version. Refusing to guess."
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "$intent -> $version"
+
+      - name: fetch the pinned binary inputs
+        if: steps.kind.outputs.kind == 'release'
+        id: pins
+        env:
+          DASH_PINS_TOKEN: ${{ secrets.DASH_PINS_TOKEN }}
+        run: |
+          set -euo pipefail
+          make pins PINS_REF=main
+          echo "sha=$(git -C .pins rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: bump VERSION and the CHANGELOG, then push
+        if: steps.kind.outputs.kind == 'release'
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          TOKEN: ${{ secrets.DASH_RELEASE_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          [ -n "${TOKEN:-}" ] || { echo "::error::DASH_RELEASE_TOKEN is not set"; exit 1; }
+
+          python3 .github/scripts/release.py rewrite \
+            --changelog CHANGELOG.md --version "$VERSION"
+          printf '%s\n' "$VERSION" > VERSION
+
+          # Show the reviewer-visible consequence before it lands on main.
+          git --no-pager diff --stat
+          echo "--- CHANGELOG diff ---"
+          git --no-pager diff -- CHANGELOG.md | head -40
+
+          git -c user.name=github-actions[bot] \
+              -c user.email=41898282+github-actions[bot]@users.noreply.github.com \
+              commit -aqm "chore(release): $VERSION [skip-bump]" \
+            || { echo "::error::nothing to commit; is the CHANGELOG already released?"; exit 1; }
+
+          git push "https://x-access-token:$TOKEN@github.com/$REPO.git" HEAD:main
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "bumped to $VERSION at $(git rev-parse HEAD)"
+
+      - name: build and fingerprint the released tree
+        if: steps.kind.outputs.kind == 'release'
+        id: art
+        env:
+          DASH_PINS_TOKEN: ${{ secrets.DASH_PINS_TOKEN }}
+        run: |
+          set -euo pipefail
+          git pull --rebase origin main >/dev/null 2>&1 || true
+          make build
+          make fingerprint | tee /tmp/fingerprint.txt
+          echo "VERSION in image: $(grep -c "$(cat VERSION)" build/rootfs/etc/dash-release) match(es)"
+
+      - name: tag the pins repo
+        if: steps.kind.outputs.kind == 'release'
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          PINS_SHA: ${{ steps.pins.outputs.sha }}
+          TOKEN: ${{ secrets.DASH_PINS_TOKEN }}
+        run: |
+          set -euo pipefail
+          cd .pins
+          git -c user.name=github-actions[bot] \
+              -c user.email=41898282+github-actions[bot]@users.noreply.github.com \
+              tag -a "$VERSION" -m "Dash OS $VERSION pinned inputs" "$PINS_SHA"
+          git push "https://x-access-token:$TOKEN@github.com/H4rryp0tt3r/kindle-dash-pins.git" \
+            "refs/tags/$VERSION" \
+            || echo "::notice::pins tag $VERSION already exists; leaving it alone"
+
+      - name: tag this repo, with the fingerprint in the annotation
+        if: steps.kind.outputs.kind == 'release'
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          INTENT: ${{ steps.kind.outputs.intent }}
+          PINS_SHA: ${{ steps.pins.outputs.sha }}
+          TOKEN: ${{ secrets.DASH_RELEASE_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          {
+            echo "Dash OS $VERSION"
+            echo
+            echo "intent:   $INTENT"
+            echo "code-sha: $(git rev-parse HEAD)"
+            echo "pins-sha: $PINS_SHA"
+            echo
+            echo "A release is these two SHAs plus this fingerprint. Reproduce it with:"
+            echo "  git checkout $VERSION && make pins && make build && make fingerprint"
+            echo
+            echo "rootfs content fingerprint:"
+            echo
+            cat /tmp/fingerprint.txt
+          } > /tmp/annot
+
+          git -c user.name=github-actions[bot] \
+              -c user.email=41898282+github-actions[bot]@users.noreply.github.com \
+              tag -a "$VERSION" -F /tmp/annot
+          git push "https://x-access-token:$TOKEN@github.com/$REPO.git" "refs/tags/$VERSION"
+          echo "tagged $VERSION"
+
+      - name: summarise
+        if: always() && steps.kind.outputs.kind == 'release'
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          REPO: ${{ github.repository }}
+        run: |
+          {
+            echo "### Dash OS $VERSION released"
+            echo
+            echo '```'
+            cat /tmp/fingerprint.txt 2>/dev/null | head -20
+            echo '```'
+          } > /tmp/summary.md
+          gh api "repos/$REPO/releases" --method POST \
+            -f tag_name="$VERSION" -f name="Dash OS $VERSION" \
+            -F body=@/tmp/summary.md 2>/dev/null \
+            || echo "::notice::could not create a GitHub release (tag is what matters)"
