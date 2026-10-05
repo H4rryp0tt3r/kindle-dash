@@ -59,13 +59,19 @@ jobs:
         if: steps.cmd.outputs.cmd != ''
         env:
           AUTHOR: ${{ github.event.comment.user.login }}
-          REPO: ${{ github.repository }}
+          ASSOC: ${{ github.event.comment.author_association }}
         run: |
           set -euo pipefail
-          perm=$(gh api "repos/$REPO/collaborators/$AUTHOR/permission" --jq '.permission' 2>/dev/null || echo none)
-          case "$perm" in
-            admin|maintain|write) echo "@$AUTHOR has '$perm'; accepted" ;;
-            *) echo "::error::@$AUTHOR has '$perm' and may not use release commands"; exit 1 ;;
+          # author_association comes straight from the event payload, so this needs
+          # no API call and no permission the workflow token might not have.
+          #
+          # The previous version asked the API for the permission level and got
+          # 'none' back for the repo OWNER -- the workflow token cannot read the
+          # collaborators endpoint, and `2>/dev/null || echo none` turned that
+          # failure into "you may not use release commands".
+          case "$ASSOC" in
+            OWNER|MEMBER|COLLABORATOR) echo "@$AUTHOR is $ASSOC; accepted" ;;
+            *) echo "::error::@$AUTHOR is $ASSOC and may not use release commands"; exit 1 ;;
           esac
 
       - name: resolve the head commit
