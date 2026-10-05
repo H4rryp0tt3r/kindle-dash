@@ -23,6 +23,16 @@ name: release-finalize
 on:
   push:
     branches: [main]
+  # Recovery hatch. A release commit reaches main and the finaliser is supposed to
+  # pick it up from the push, but a run can fail, or -- as happened once -- the
+  # push can be made by GITHUB_TOKEN, which GitHub does not trigger workflows
+  # from. Then the content is on main with no tag and no way to restart the step.
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version being released, e.g. 0.2.0. The content must already be on main."
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -42,9 +52,24 @@ jobs:
 
       - name: is this a release commit, and not a bump commit?
         id: kind
+        env:
+          DISPATCH_VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
           git log -1 --format=%B > /tmp/msg
+
+          if [ -n "${DISPATCH_VERSION:-}" ]; then
+            # Manual recovery: trust the operator, and derive the intent from the
+            # jump rather than asking them for it, so a wrong 'minor' cannot turn
+            # a patch into a major. The target still has to come after VERSION.
+            intent=$(python3 .github/scripts/release.py intent-from-target \
+              --from "$(cat VERSION)" --to "$DISPATCH_VERSION")
+            echo "kind=release" >> "$GITHUB_OUTPUT"
+            echo "target=$DISPATCH_VERSION" >> "$GITHUB_OUTPUT"
+            echo "intent=$intent" >> "$GITHUB_OUTPUT"
+            echo "dispatched: $intent -> $DISPATCH_VERSION"
+            exit 0
+          fi
           if python3 .github/scripts/release.py guard-bump --message-file /tmp/msg; then
             echo "kind=bump"; echo "::notice::this push is the release bump commit; nothing to do"
             echo "kind=bump" >> "$GITHUB_OUTPUT"; exit 0
@@ -61,8 +86,14 @@ jobs:
         run: |
           set -euo pipefail
           intent="${{ steps.kind.outputs.intent }}"
-          version=$(python3 .github/scripts/release.py next-version \
-            --current "$(cat VERSION)" --intent "$intent")
+          target="${{ steps.kind.outputs.target }}"
+          if [ -n "$target" ]; then
+            # dispatched: the intent was already derived from the jump
+            version="$target"
+          else
+            version=$(python3 .github/scripts/release.py next-version \
+              --current "$(cat VERSION)" --intent "$intent")
+          fi
           planned=$(sed -n 's/^Planned-Version: //p' /tmp/msg | head -1)
           if [ -n "$planned" ] && [ "$planned" != "$version" ]; then
             echo "::error::the merge planned $planned but the arithmetic says $version. Refusing to guess."

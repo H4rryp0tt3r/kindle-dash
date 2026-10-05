@@ -151,6 +151,27 @@ def read_message(args):
         return fh.read()
 
 
+def cmd_intent_from_target(args):
+    """Classify the jump between two versions.
+
+    Used when finishing a release by hand: the content is already on main, so no
+    commit message carries Release-Intent to read. The bump still has to know
+    whether it is a patch or a minor, and guessing from the target alone would
+    turn 0.9.0 -> 0.10.0 into a patch.
+    """
+    frm = parse_version(args.frm)
+    to = parse_version(args.to)
+    if to <= frm:
+        die("--to %s does not come after --from %s" % (args.to, args.frm))
+    if to[0] != frm[0]:
+        intent = "major"
+    elif to[1] != frm[1]:
+        intent = "minor"
+    else:
+        intent = "patch"
+    print(intent)
+
+
 def cmd_intent(args):
     m = INTENT_RE.search(read_message(args))
     if not m:
@@ -181,6 +202,14 @@ def main():
     p.add_argument("--version", required=True)
     p.add_argument("--date", default=None, help="YYYY-MM-DD; default today")
     p.set_defaults(fn=cmd_rewrite)
+
+    p = sub.add_parser(
+        "intent-from-target",
+        help="print the release intent that turns --from into --to",
+    )
+    p.add_argument("--from", dest="frm", required=True)
+    p.add_argument("--to", dest="to", required=True)
+    p.set_defaults(fn=cmd_intent_from_target)
 
     p = sub.add_parser("intent", help="print the release intent of a commit message")
     p.add_argument("--message-file", required=True, help="path, or - for stdin")
