@@ -21,6 +21,13 @@ FROM docker.io/library/ubuntu@sha256:224a1869083a311ef3f13648a154ba79832fbef6364
 #   (see docs/pinned-inputs.md). arm-unknown-linux-gnueabi is soft-float, which
 #   is the only float ABI this CPU has (golden rule 14); build.sh check-float
 #   still proves the output rather than trusting the target triple.
+# gcc + libc6-dev     HOST toolchain, and the only thing that can link a test
+#   binary. `rustc --test` builds src/*.rs for x86_64-unknown-linux-gnu and
+#   needs a native `cc` plus the native crt objects (Scrt1.o, crti.o) and libc;
+#   the armel cross toolchain supplies neither. libc6-dev is named explicitly
+#   because gcc only RECOMMENDS it and this image installs with
+#   --no-install-recommends. Unit tests run on the host, so this is what makes
+#   `make test` work without Cargo, crates or qemu.
 # e2fsprogs            mke2fs -d, debugfs, dumpe2fs, e2fsck (ext3, no loop dev)
 # dosfstools           mkfs.vfat, for the p4 userstore if we ever image it
 ARG RUST_TOOLCHAIN=1.83.0
@@ -29,9 +36,15 @@ ARG RUST_TOOLCHAIN=1.83.0
 # proxy looks in ~/.rustup, finds nothing, and errors out.
 ENV RUSTUP_HOME=/opt/rustup \
     CARGO_HOME=/opt/cargo
+
+# Deliberately two layers, not one: the apt layer is cheap to rebuild, the rustup
+# layer costs a ~1 GB download. Keeping them separate means changing a package
+# name does not re-download the toolchain.
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
+        gcc \
+        libc6-dev \
         gcc-arm-linux-gnueabi \
         binutils-arm-linux-gnueabi \
         libc6-dev-armel-cross \
@@ -43,7 +56,9 @@ RUN set -eux; \
         gzip \
         curl \
         ca-certificates; \
-    rm -rf /var/lib/apt/lists/*; \
+    rm -rf /var/lib/apt/lists/*
+
+RUN set -eux; \
     curl -sSf https://sh.rustup.rs | sh -s -- \
         -y --profile minimal --no-modify-path \
         --default-toolchain "$RUST_TOOLCHAIN" \

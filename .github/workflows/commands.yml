@@ -1,0 +1,189 @@
+# PR commands: !approve and !release-patch|minor|major
+#
+#   !approve           record approval for the PR's current head commit
+#   !release-patch     merge this PR as a patch release   (0.1.0 -> 0.1.1)
+#   !release-minor     merge this PR as a minor release   (0.1.0 -> 0.2.0)
+#   !release-major     merge this PR as a major release   (0.9.3 -> 1.0.0)
+#
+# Why statuses and not GitHub's "required approving reviews": a person cannot
+# approve their own PR, and this repository has exactly one person. So approval
+# is a deliberate, recorded act -- a `!approve` comment from someone with write
+# access, surfaced as a required status check called `approved`. Same guarantee,
+# no reliance on how GitHub treats a bot's self-approval.
+#
+# `release-gate` is reported only after every precondition is verified. Because
+# it is a REQUIRED check, an ordinary PR stays unmergeable ("Expected -- waiting
+# for status to be reported") until a release command runs: which is how "the
+# merge button does nothing" is actually enforced.
+name: commands
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: write
+  pull-requests: write
+  statuses: write
+
+jobs:
+  command:
+    name: command
+    if: github.event.issue.pull_request
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: work out which command this is
+        id: cmd
+        env:
+          BODY: ${{ github.event.comment.body }}
+          PR: ${{ github.event.issue.number }}
+          AUTHOR: ${{ github.event.comment.user.login }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          intent=""
+          case "$BODY" in
+            *"!approve"*)                          cmd=approve ;;
+            *"!release-patch"*)                    cmd=release; intent=patch ;;
+            *"!release-minor"*)                    cmd=release; intent=minor ;;
+            *"!release-major"*)                    cmd=release; intent=major ;;
+            *) echo "no command in comment; nothing to do"; exit 0 ;;
+          esac
+          echo "cmd=$cmd"    >> "$GITHUB_OUTPUT"
+          echo "intent=$intent" >> "$GITHUB_OUTPUT"
+          echo "PR #$PR, command '$cmd' ${intent:+(intent: $intent)} from @$AUTHOR"
+
+      - name: only someone with write access may command
+        if: steps.cmd.outputs.cmd != ''
+        env:
+          AUTHOR: ${{ github.event.comment.user.login }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          perm=$(gh api "repos/$REPO/collaborators/$AUTHOR/permission" --jq '.permission' 2>/dev/null || echo none)
+          case "$perm" in
+            admin|maintain|write) echo "@$AUTHOR has '$perm'; accepted" ;;
+            *) echo "::error::@$AUTHOR has '$perm' and may not use release commands"; exit 1 ;;
+          esac
+
+      - name: resolve the head commit
+        id: head
+        if: steps.cmd.outputs.cmd != ''
+        env:
+          PR: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          state=$(gh api "repos/$REPO/pulls/$PR" --jq '.state')
+          sha=$(gh api "repos/$REPO/pulls/$PR" --jq '.head.sha')
+          merged=$(gh api "repos/$REPO/pulls/$PR" --jq '.merged')
+          echo "state=$state" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha"     >> "$GITHUB_OUTPUT"
+          echo "merged=$merged" >> "$GITHUB_OUTPUT"
+          echo "head $sha (state=$state merged=$merged)"
+
+      - name: "approve: record approval for the head commit"
+        if: steps.cmd.outputs.cmd == 'approve'
+        env:
+          SHA: ${{ steps.head.outputs.sha }}
+          STATE: ${{ steps.head.outputs.state }}
+          REPO: ${{ github.repository }}
+          AUTHOR: ${{ github.event.comment.user.login }}
+        run: |
+          set -euo pipefail
+          [ "$STATE" = open ] || { echo "::error::PR is not open"; exit 1; }
+          gh api --method POST "repos/$REPO/statuses/$SHA" \
+            -f state=success -f context=approved \
+            -f description="approved by @$AUTHOR via !approve" >/dev/null
+          echo "approved recorded on $SHA"
+
+      - name: "release: verify every precondition"
+        id: gate
+        if: steps.cmd.outputs.cmd == 'release'
+        env:
+          SHA: ${{ steps.head.outputs.sha }}
+          STATE: ${{ steps.head.outputs.state }}
+          MERGED: ${{ steps.head.outputs.merged }}
+          INTENT: ${{ steps.cmd.outputs.intent }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.issue.number }}
+          AUTHOR: ${{ github.event.comment.user.login }}
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$1"; echo "RELEASE_REFUSED: $1"; exit 1; }
+
+          [ "$STATE" = open ]   || fail "PR #$PR is not open (state=$STATE)"
+          [ "$MERGED" = false ] || fail "PR #$PR is already merged"
+
+          approved=$(gh api "repos/$REPO/commits/$SHA/status" --jq \
+            '[.statuses[] | select(.context=="approved")] | .[0].state // "none"')
+          [ "$approved" = success ] || fail \
+            "no !approve recorded on $SHA (status: $approved). Run !approve on the PR first."
+
+          # Every required CI check must have RUN and PASSED. Pending is a
+          # refusal, not a wait: a release command is a decision, not a queue.
+          pending=$(gh api "repos/$REPO/commits/$SHA/check-runs" --jq \
+            '[.check_runs[] | select(.name=="changelog" or .name=="test" or .name=="build")
+              | select(.status!="completed" or .conclusion!="success")] | length')
+          [ "$pending" -eq 0 ] || fail \
+            "$pending required check(s) have not passed on $SHA (see PR checks)"
+
+          version=$(python3 .github/scripts/release.py next-version \
+            --current "$(cat VERSION)" --intent "$INTENT")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "all preconditions met: $INTENT release -> $version"
+
+      - name: "release: satisfy the ruleset, then squash-merge"
+        if: steps.cmd.outputs.cmd == 'release' && steps.gate.outputs.version != ''
+        env:
+          SHA: ${{ steps.head.outputs.sha }}
+          INTENT: ${{ steps.cmd.outputs.intent }}
+          VERSION: ${{ steps.gate.outputs.version }}
+          PR: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
+          AUTHOR: ${{ github.event.comment.user.login }}
+        run: |
+          set -euo pipefail
+
+          # The ruleset requires this check; reporting it is what turns a dead
+          # merge button into a live one, for this PR and only this PR.
+          gh api --method POST "repos/$REPO/statuses/$SHA" \
+            -f state=success -f context=release-gate \
+            -f description="!release-$INTENT authorised by @$AUTHOR" >/dev/null
+
+          title=$(gh api "repos/$REPO/pulls/$PR" --jq '.title')
+          # Release-Intent is how the post-merge workflow knows which bump to
+          # make without any state passed between workflow runs. Planned-Version
+          # lets it cross-check the arithmetic instead of trusting it.
+          #
+          # printf with explicit \n, not a multi-line bash string: a literal
+          # newline here drops that line to column 1, which silently ends the
+          # YAML block scalar and turns the rest into a YAML syntax error.
+          message=$(printf 'Release-Intent: %s\nPlanned-Version: %s\nApproved-By: @%s' \
+            "$INTENT" "$VERSION" "$AUTHOR")
+
+          gh api --method PUT "repos/$REPO/pulls/$PR/merge" \
+            -f merge_method=squash \
+            -f commit_title="Dash OS $VERSION: $title" \
+            -f commit_message="$message" >/dev/null \
+            || { echo "::error::the merge was refused (a required check is not green?)"; exit 1; }
+
+          echo "squash-merged PR #$PR as $VERSION ($INTENT)"
+
+      - name: "release: report the outcome on the PR"
+        if: always() && steps.cmd.outputs.cmd == 'release'
+        env:
+          PR: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
+          VERSION: ${{ steps.gate.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -n "${VERSION:-}" ]; then
+            body=$(printf 'Squash-merged as **%s**. The post-merge workflow on `main` will bump `VERSION`, move this PR entry from *Unreleased* to `%s`, build, and tag.' \
+              "$VERSION" "$VERSION")
+          else
+            body=$(printf '**Release refused.** See the workflow run: the PR needs `!approve` and green checks (`changelog`, `test`, `build`) on its current head commit.')
+          fi
+          gh api "repos/$REPO/issues/$PR/comments" -f body="$body" >/dev/null
