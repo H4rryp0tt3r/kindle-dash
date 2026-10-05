@@ -64,9 +64,15 @@ either repo; they live beside them at `~/Documents/kindle-dash-assets/`.
 - **Tags are immutable.** Deletion and updates are blocked by a repository
   ruleset, including before 1.0.0. A bad release is fixed by a new patch
   version, not by moving a tag.
-- A release is **two SHAs**: this repo at tag `X` and `kindle-dash-pins` at tag
-  `X`. Both, plus the rootfs content fingerprint, are recorded in the tag
-  annotation, so one tag fully determines the release.
+- A release is **two SHAs**: this repo at tag `X`, and the pinned-inputs commit
+  named in `PINS.lock`. Both, plus the rootfs content fingerprint, are recorded in
+  the tag annotation, so one tag fully determines the release.
+- **The pins repo has no tags, and must not acquire them.** A commit SHA is
+  already immutable and content-addressed; a per-release tag is an alias that can
+  only fall out of sync, and every release has to write it or be one-sided. What
+  makes the SHA stable is protecting that repo's default branch — no force push,
+  no delete — plus `make verify`'s SHA256SUMS. Changing pins means editing the one
+  `sha =` line in `PINS.lock`, in a PR.
 
 ## Release process
 
@@ -89,7 +95,7 @@ No change reaches `main` by being pushed to it.
    which only a release command ever produces.
 6. The squash commit carries `Release-Intent:` in its message. The push to
    `main` triggers `release-finalize`, which bumps `VERSION`, rewrites the
-   CHANGELOG, builds, and tags both repos. Nothing about a version number is
+   CHANGELOG, builds, and tags this repo. Nothing about a version number is
    decided by a human typing it into a file.
 
 Tags are created **after** the build succeeds, never before. The bump commit

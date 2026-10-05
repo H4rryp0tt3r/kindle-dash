@@ -28,8 +28,11 @@ PINS_DIR := $(HERE)/.pins
 
 # The private repo holding every binary input.
 PINS_REPO ?= H4rryp0tt3r/kindle-dash-pins
-# A release pins both repos at the same tag. Override with `make pins PINS_REF=`.
-PINS_REF ?= $(shell git -C $(HERE) describe --tags --exact-match 2>/dev/null || echo main)
+# The pinned inputs, by SHA, out of PINS.lock. See that file for why there are no
+# pins tags: a commit SHA is already immutable, so it is the reference itself.
+# Override with `make pins PINS_REF=` only to build against something else on purpose.
+PINS_SHA ?= $(shell sed -n 's/^sha *= *//p' PINS.lock | head -1)
+PINS_REF ?= $(PINS_SHA)
 
 # The env image tag is derived from the Containerfile's sha256, so editing the
 # Containerfile changes the tag and transparently forces a rebuild.
@@ -53,7 +56,7 @@ help:
 	@echo "Dash OS -- version $$(cat $(HERE)/VERSION 2>/dev/null || echo none)"
 	@echo ""
 	@echo "  make build            build artifacts/ (ensures pins + env)"
-	@echo "  make pins             fetch binary inputs from $(PINS_REPO) @ $(PINS_REF)"
+	@echo "  make pins             fetch the pinned binary inputs named in PINS.lock"
 	@echo "  make test             unit tests for the userland renderer"
 	@echo "  make bootstrap        prepare only: pins + the env image"
 	@echo "  make env              provide the build-environment image"
@@ -72,21 +75,20 @@ help:
 # Plain git cannot authenticate here -- the repo is private and there is no
 # credential helper on the dev machine.
 pins:
-	@echo "== pins: $(PINS_REPO) @ $(PINS_REF)"
+	@echo "== pins: $(PINS_REPO) @ $(PINS_REF) (from PINS.lock)"
 	@tok=""; \
 	if [ -n "$${DASH_PINS_TOKEN:-}" ]; then tok="$${DASH_PINS_TOKEN}"; \
 	elif command -v gh >/dev/null 2>&1 && gh auth token >/dev/null 2>&1; then \
 		tok="$$(gh auth token)"; \
 	fi; \
 	rm -rf "$(PINS_DIR)"; \
-	if [ -n "$$tok" ]; then \
-		git -c advice.detachedHead=false clone -q --depth 1 --branch "$(PINS_REF)" \
-			"https://x-access-token:$$tok@github.com/$(PINS_REPO).git" "$(PINS_DIR)"; \
-	else \
-		echo "   no token; cloning $(PINS_REPO) unauthenticated (will fail if private)" >&2; \
-		git -c advice.detachedHead=false clone -q --depth 1 --branch "$(PINS_REF)" \
-			"https://github.com/$(PINS_REPO).git" "$(PINS_DIR)"; \
-	fi
+	url="https://github.com/$(PINS_REPO).git"; \
+	if [ -n "$$tok" ]; then url="https://x-access-token:$$tok@github.com/$(PINS_REPO).git"; \
+	else echo "   no token; fetching $(PINS_REPO) unauthenticated (will fail if private)" >&2; fi; \
+	git init -q "$(PINS_DIR)"; \
+	git -C "$(PINS_DIR)" remote add origin "$$url"; \
+	git -C "$(PINS_DIR)" fetch -q --depth 1 origin "$(PINS_REF)"; \
+	git -C "$(PINS_DIR)" -c advice.detachedHead=false checkout -q FETCH_HEAD
 	@# Copy only the input directories; the pins repo's own README/.gitignore stay put.
 	@tar -C "$(PINS_DIR)" -cf - base-kernel base-diag third-party recovery \
 		| tar -C "$(HERE)" -xf -

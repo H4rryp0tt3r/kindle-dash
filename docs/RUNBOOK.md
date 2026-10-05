@@ -43,7 +43,7 @@ make build
 ```
 
 `make build` runs `make pins` first, which clones the **private
-`kindle-dash-pins` repo** at the tag matching this one and materialises the
+`kindle-dash-pins` repo** at the commit named in `PINS.lock` and materialises the
 kernels, busybox, runit, the waveform and the stock U-Boot at the paths the
 build reads. Nothing binary is committed to this repository. See
 `../README.md`.

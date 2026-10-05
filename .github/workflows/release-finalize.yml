@@ -9,7 +9,7 @@
 #   3. fetch the pinned binaries, and record the exact pins SHA used
 #   4. move Unreleased -> <version> in CHANGELOG.md, bump VERSION, commit, push
 #   5. build the rootfs and fingerprint it
-#   6. tag the pins repo AND this repo at <version>
+#   6. tag this repo at <version>, recording the pinned-inputs SHA from PINS.lock
 #
 # Step 4 before step 5 on purpose: /etc/dash-release inside the rootfs is
 # generated from VERSION, so the artifact has to be built from the bumped tree.
@@ -109,8 +109,18 @@ jobs:
           DASH_PINS_TOKEN: ${{ secrets.DASH_PINS_TOKEN }}
         run: |
           set -euo pipefail
-          make pins PINS_REF=main
-          echo "sha=$(git -C .pins rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          # No PINS_REF override. It used to say PINS_REF=main, which meant a
+          # release recorded whatever the pins branch happened to hold and called
+          # it pinned. Pinning only means something if nothing overrides it.
+          make pins
+          locked=$(sed -n 's/^sha *= *//p' PINS.lock | head -1)
+          got=$(git -C .pins rev-parse HEAD)
+          if [ "$locked" != "$got" ]; then
+            echo "::error::PINS.lock says $locked but the fetch produced $got"
+            exit 1
+          fi
+          echo "PINS.lock holds the exact commit fetched."
+          echo "sha=$got" >> "$GITHUB_OUTPUT"
 
       - name: bump VERSION and the CHANGELOG, then push
         if: steps.kind.outputs.kind == 'release'
@@ -162,45 +172,6 @@ jobs:
           make build
           make fingerprint | tee /tmp/fingerprint.txt
           echo "VERSION in image: $(grep -c "$(cat VERSION)" build/rootfs/etc/dash-release) match(es)"
-
-      - name: tag the pins repo
-        if: steps.kind.outputs.kind == 'release'
-        env:
-          VERSION: ${{ steps.ver.outputs.version }}
-          PINS_SHA: ${{ steps.pins.outputs.sha }}
-          # READ token -- only good for `make pins`. This step needs write.
-          READ_TOKEN: ${{ secrets.DASH_PINS_TOKEN }}
-          WRITE_TOKEN: ${{ secrets.DASH_PINS_WRITE_TOKEN }}
-          PINS_REPO: H4rryp0tt3r/kindle-dash-pins
-        run: |
-          set -euo pipefail
-          [ -n "${WRITE_TOKEN:-}" ] || {
-            echo "::error::DASH_PINS_WRITE_TOKEN is not set; a release is two SHAs and the pins repo would stay untagged."
-            exit 1
-          }
-
-          cd .pins
-          # Already there? Say so, and say why. Do not fold "could not push" into
-          # "already exists": a release that is tagged in one repo and not the
-          # other is exactly the state this file is supposed to make impossible,
-          # and the previous `|| echo` reported it as success.
-          if git ls-remote --exit-code --tags origin "refs/tags/$VERSION" >/dev/null 2>&1; then
-            echo "::notice::$PINS_REPO already has tag $VERSION; leaving it alone"
-            exit 0
-          fi
-
-          git -c user.name=github-actions[bot] \
-              -c user.email=41898282+github-actions[bot]@users.noreply.github.com \
-              tag -a "$VERSION" -m "Dash OS $VERSION pinned inputs" "$PINS_SHA"
-          # Clear the checkout header here too: it is configured globally for
-          # every github.com URL, so it also hijacks this push into the pins repo.
-          # Without it the push silently runs as github-actions[bot].
-          git -c "http.https://github.com/.extraheader=" \
-            push "https://x-access-token:$WRITE_TOKEN@github.com/$PINS_REPO.git" \
-            "refs/tags/$VERSION" \
-            || { echo "::error::could not tag $PINS_REPO at $VERSION -- the release is only half done"; exit 1; }
-
-          echo "tagged $PINS_REPO at $VERSION"
 
       - name: tag this repo, with the fingerprint in the annotation
         if: steps.kind.outputs.kind == 'release'

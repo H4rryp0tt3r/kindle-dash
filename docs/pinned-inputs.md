@@ -6,13 +6,13 @@ identity.
 
 **These bytes are not in this repository.** They are Amazon firmware and
 tooling extracted from a Kindle, so they are not redistributable and live in the
-private **`kindle-dash-pins`** repo. `make pins` clones it at the tag matching
+private **`kindle-dash-pins`** repo. `make pins` fetches the exact commit named in
 this repo, expands the `.gz` twins and drops them at the paths `build.sh` reads;
 `make verify` then checks every hash. Nothing below is committed here except
 `base-kernel/config-declared.txt` and `third-party/busybox/applets.txt`, which
 are authored text.
 
-A release is therefore two SHAs — this repo at tag `X` and `kindle-dash-pins` at
+A release is therefore two SHAs — this repo at tag `X`, and the pins commit in
 tag `X` — and the tag annotation records both, plus the rootfs fingerprint.
 
 | what | file (in the pins repo) | md5 | size | recipe? |
