@@ -36,24 +36,14 @@ firmware which is already gzip and committed as-is.
 
 ## USB maintenance inputs
 
-`third-party/usbnet/` holds the raw-byte hashes and gzipped twins for exactly
-`fsl_otg_arc.ko`, `arcotg_udc.ko`, and `g_ether.ko`, taken from the verified stock
-asset shelf. The stock module metadata gives g_ether a dependency on arcotg_udc;
-OTG support is loaded first for controller registration. Match `3.0.35-lab126`;
-never force-load these modules or add host-controller drivers speculatively.
-
-`third-party/dropbear/` supplies externally built **static** Dropbear/dropbearkey
-with upstream release/source hash, external compiler/flags and license notices.
-Dash compiles no C and adds no crates. These pins use Dropbear 2026.94 with
-static musl 1.2.5 and bundled libtomcrypt/libtommath; system glibc/crypto is not
-linked. The external glibc candidate required Linux 3.2 and was rejected. Syslog,
-password authentication and forwarding are compiled out (stderr logging is
-unconditional, so this server has no `-E` flag). Build checks reject dynamic ARM
-executables, wrong module vermagic and unsupported FPU instructions. Actual
-Linux 3.0.35 runtime compatibility must still be tested on hardware.
-
-Per-device keys and trusted entropy seeds are generated separately and are not
-pinned release inputs. See [`USB-SSH.md`](USB-SSH.md).
+- `third-party/usbnet/`: verified stock `fsl_otg_arc`, `arcotg_udc`, `g_ether`.
+  Load in that order. Match `3.0.35-lab126`. No force-load or extra host drivers.
+- `third-party/dropbear/`: static Dropbear/dropbearkey 2026.94, musl 1.2.5,
+  bundled libtomcrypt/libtommath. Source hashes, external recipe, licenses in pins.
+  No C built here. No crates. Glibc candidate required Linux 3.2: rejected.
+- Passwords, forwarding, syslog compiled out. Logs go to stderr. No `-E` flag.
+- Build checks: static ARM, module vermagic, FPU. Hardware still untested.
+- Device keys/seeds not release inputs. Setup: [`USB-SSH.md`](USB-SSH.md).
 
 ## `base-kernel/` — pinned main-slot kernel
 

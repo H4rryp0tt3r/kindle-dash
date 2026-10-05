@@ -30,17 +30,10 @@ built from, never a literal written by hand.
 | maintenance SSH | `30-sshd` — key-only Dropbear; disabled until provisioned |
 | rootfs | 64 MiB ext3, label `dash-root`, no shared libc or loader |
 
-USB provisioning and Mac configuration: [`USB-SSH.md`](USB-SSH.md). Main-kernel
-USB behavior still needs hardware validation; the working panel baseline remains.
-The EPDC driver is built in, so `/dev/fb0` exists before
-userspace runs. Stage 1 keeps the EPDC powered (`echo -1 > …/mxc_epdc_pwrdown`)
-and writes nothing outside the filesystem.
-
-`10-dash` paints the whole frame in exactly one GC16 update — a full pass over a
-1024x758 panel is slow and visibly flashes, so the rule is **one e-ink update per
-frame**. Paint-once-per-boot is no longer required: the streaming coordinator
-refreshes when output/status changes, coalesces lines arriving during a refresh,
-and blocks while idle. No other service touches the framebuffer.
+USB setup: [`USB-SSH.md`](USB-SSH.md). Hardware untested.
+EPDC built in. Stage 1 keeps power on (`-1` to `mxc_epdc_pwrdown`). No raw writes.
+`10-dash` alone paints. New output → refresh. Busy → combine lines. Idle → block.
+One conservative GC16 update per frame. Flashes expected. Paint-once rule gone.
 
 ## Build
 

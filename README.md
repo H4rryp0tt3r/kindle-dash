@@ -6,11 +6,9 @@ i.MX6SL): Amazon's stock lab126 3.0.35 kernel with the EPDC e-ink panel built in
 widget dashboard. There is no serial console; the panel and
 `/var/log/dash.log` are the only output.
 
-**Status:** the init system comes up and `Hello World!` renders on the panel.
-The panel streams current-boot output and USB/SSH status, including failures.
-USB Ethernet and key-only maintenance SSH are implemented for validation; actual
-main-kernel gadget enumeration and SSH still require a device test. See
-[`docs/USB-SSH.md`](docs/USB-SSH.md) for provisioning and connection instructions.
+**Works on device:** boot + Hello World.
+**Added, hardware untested:** USB SSH + streaming boot/status/errors on screen.
+Setup: [`docs/USB-SSH.md`](docs/USB-SSH.md).
 
 ## Build
 

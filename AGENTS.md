@@ -274,18 +274,12 @@ Build notes learned the hard way:
 
 ## USB maintenance SSH and future WiFi
 
-- **SSH over USB Ethernet** is the maintenance/debug channel; future WiFi is an
-  operational network, not a prerequisite for debugging it. No serial, ever.
-- Load only the pinned ARC gadget dependency closure; no forced module loading.
-  Main boots never export mass storage. Diagnostics remains independent recovery.
-- Dropbear/dropbearkey are static external builds, pinned as binaries with their
-  exact upstream source hash and external build recipe. No C is compiled here.
-- Canonical release images contain no device keys or seeds. Provision a separate
-  image with an explicit public key and fresh per-device seed; never clone it.
-- Passwords and forwarding are disabled. Bind only to `192.168.15.244:22`.
-  Missing provisioning or entropy disables SSH without blocking the panel.
-- Runtime seed/host-key state is private (0700 directories, 0600 files), outside
-  release fingerprints; flashing a canonical image removes that device state.
+- USB SSH for maintenance. WiFi later. No serial.
+- Pinned ARC gadget modules only. No force-load. Main: no mass storage. Diags: recovery.
+- Static Dropbear/dropbearkey pinned with source hash + external recipe. No C built here.
+- Release image: no keys/seeds. Provision separate image. One device. Never clone.
+- Bind `192.168.15.244:22`. No passwords/forwarding. Bad provisioning/entropy: SSH off, panel on.
+- Device state: dirs 0700, files 0600. Reflash removes it. Not part of release fingerprint.
 - WiFi needs stock `ath6kl_sdio.ko` + `cfg80211.ko` + `ath.ko` from
   `~/Documents/kindle-dash-assets/modules/` — ath6kl is compat-wireless, **not in
   the Amazon GPL drop** — so it only loads if the vermagic stays

@@ -70,18 +70,13 @@ immutable, so a tag per release is an alias with nothing to add.
 
 ### Added
 
-- Streaming panel feedback for current-boot logs and USB/SSH startup/failures.
-  Paint-once-per-boot is removed: one panel owner refreshes changed frames,
-  coalesces output during a refresh and blocks when idle. Pending setup shows a
-  watchdog timeout; SSH is reported listening only after verifying its socket.
-- USB Ethernet maintenance access using the pinned stock ARC gadget modules and
-  a separate runit service, without WiFi, serial, mass-storage export, or changes
-  to the panel service. Hardware enumeration still requires device validation.
-- Key-only static Dropbear SSH, a devpts-backed maintenance shell, and explicit
-  per-device image provisioning. Release images contain no authorized keys,
-  private host keys, or entropy seeds; missing provisioning fails closed.
-- A Rust entropy-seed helper for the old kernel, secure persistent host identity,
-  private artifact mode checks, and runtime/provisioning regression tests.
+- Screen streams boot logs + USB/SSH status, errors, timeouts. Paint-once rule
+  removed. Single owner; idle blocks. SSH success requires verified socket.
+- USB Ethernet + key-only static Dropbear. No WiFi, serial, passwords, forwarding,
+  or main-boot disk export. Hardware untested.
+- Separate device provisioning. Release images have no keys/seeds. Rust entropy
+  helper, persistent host identity, private permissions, regression tests.
+- Short USB/SSH docs. Commands and safety checks kept.
 
 - `release-finalize.yml` accepts `workflow_dispatch` with a version, to finish a
   release whose commit is already on `main`. The bump kind is derived from the jump

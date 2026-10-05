@@ -1,162 +1,86 @@
-# USB maintenance SSH
+# USB SSH
 
-SSH over USB Ethernet is a development/maintenance connection independent of
-WiFi. It is not serial and does not export a disk. The panel streams current-boot
-logs and USB/SSH status; full logs still live at `/var/log/dash.log`. **Implementation is not a claim of device
-validation:** the pinned main kernel must actually load these stock modules and
-enumerate CDC Ethernet on the Mac before this is considered working hardware.
+Cable in. Network up. SSH shell. No WiFi. No serial. No disk export.
+**Code tested. Kindle hardware not tested yet.**
 
-## Inputs and boot
+## Build + provision
 
-`make pins` supplies three stock `3.0.35-lab126` modules (`fsl_otg_arc`,
-`arcotg_udc`, `g_ether`) and static Dropbear/dropbearkey from the private inputs
-commit in `PINS.lock`. No C is compiled by Dash; external build provenance and
-raw hashes accompany the SSH binaries in the pins repo. Never force module load.
-
-Stage 1 mounts devpts after devtmpfs. `20-usbnet` loads the gadget stack,
-configures `usb0` as `192.168.15.244/24` and reports readiness. `30-sshd` waits
-for networking and provisioning, initializes entropy, generates a device host
-key when absent, and runs Dropbear bound to that USB address. Password login,
-forwarding and telnet are disabled. A stopped/failed network or SSH service must
-not prevent `10-dash` from painting. There is no default route or internet sharing.
-
-The stock gadget advertises Ethernet; verify actual CDC descriptors and macOS
-recognition. RNDIS compiled into the module does not prove Mac support. MACs are
-fixed locally administered addresses for this single-device setup; multiple
-Kindles require distinct addresses and individual provisioning.
-
-## Panel feedback
-
-The panel retains Hello World/version/uptime/kernel, adds USB and SSH state, and
-shows up to the latest 20 wrapped lines of current-boot output. It refreshes on new
-lines/status changes, not on a timer; lines arriving during a full e-ink update
-are coalesced into the next frame. Repeated GC16 flashes are intentional.
-
-Examples:
-
-```
-USB: configured - 192.168.15.244/24
-SSH: listening - key authentication only
-```
-
-```
-USB: FAILED - loading arcotg_udc failed
-SSH: FAILED - USB network setup failed
-```
-
-Unprovisioned images show `SSH: disabled - not provisioned`. Setup that stalls
-shows `TIMED OUT` with its last reported stage after approximately 20 seconds,
-while the panel continues monitoring later recovery. `USB: configured` means
-Kindle-side configuration only, not verified Mac enumeration or connectivity.
-`SSH: listening` requires the running Dropbear child to own the exact USB TCP
-listening socket; an early bind/process failure cannot appear as success.
-
-Only `10-dash` invokes the renderer. Its own diagnostic lines are excluded from
-the stream to prevent feedback/repaint loops. Full logs remain recoverable from
-diagnostics even if USB/SSH fails. Kernel failures before userspace or failures
-of the panel itself cannot be reported by this userspace console.
-
-## Provision one device
-
-Requirements: Python 3 on the host, Podman, a built canonical rootfs, and your
-explicit **OpenSSH Ed25519 public key**. Do not supply a private key. If you do
-not have one, create a dedicated key deliberately with the host's `ssh-keygen`.
+Need Podman, Make, host Python 3, one OpenSSH Ed25519 **public** key.
 
 ```
 make build
-make provision-ssh PUBKEY=/absolute/path/to/key.pub
+make provision-ssh PUBKEY=/absolute/path/key.pub
 ```
 
-This leaves `artifacts/dash-rootfs.img` unchanged and creates
-`artifacts/dash-rootfs-ssh.img` (0600): a **private personalized image** containing
-your public key and a unique 64-byte host-generated cryptographic seed. The
-output must not already exist. Do not publish it, cache it in CI, or install the
-same copy onto multiple devices. The normal release fingerprint always describes
-the canonical, unprovisioned image.
+- Canonical image: `artifacts/dash-rootfs.img`. No credentials. Unchanged.
+- Private device image: `artifacts/dash-rootfs-ssh.img`, mode 0600.
+- Output must not exist. One image per device. Never share, publish, or clone.
+- Fresh 64-byte seed. Seed first, host key next, SSH last. Bad state: SSH off.
+- Keys + rotating seed: `/var/lib/dash-ssh`, dirs 0700, files 0600.
+- Interrupted seed consumption: reprovision. Never reuse an old seed/image.
+- Reflash removes identity. Preserve current state securely, or provision fresh
+  and verify new fingerprint. Never dismiss a changed-host warning blindly.
 
-At first SSH startup the Rust helper consumes the seed durably, credits entropy
-through the Linux random-device API, persists a fresh seed, and creates a
-volatile success marker. Only then may Dropbear create its Ed25519 host key.
-Linux 3.0.35 cannot use modern getrandom readiness checks; /dev/urandom alone is
-not adequate evidence that early boot randomness is safe. Missing/invalid seed
-or any failed state operation leaves SSH disabled. Interrupted seed consumption
-may require reprovisioning; never restore a consumed seed from a stale image.
+## Install + connect
 
-The initial 64-byte host seed is credited once; subsequent seeds derive from the
-seeded kernel CSPRNG and preserve its security state, not new independent entropy.
-This assumes the state remains secret and unique to this device. Runtime state
-is not a protection against a compromised root account or physical disk access.
+Follow [RUNBOOK](RUNBOOK.md). Use **private image for write AND read-back hash**.
+Slice `seek=0`. Hash must match before boot. No MBR/raw-sector writes.
 
-Host keys and the rotating seed persist in `/var/lib/dash-ssh` on p1. They are
-not present in canonical releases. Reflashing p1 replaces them: either securely
-preserve the current unique device state through an explicit backup/restore
-procedure, or provision fresh state and verify the new host fingerprint. Do not
-blindly remove a known-hosts warning or reuse a historical personalized image.
+Mac sees USB Ethernet adapter. Configure **that adapter only**:
 
-## Install and connect
+| Setting | Value |
+|---|---|
+| Mac IP | `192.168.15.201` |
+| Mask | `255.255.255.0` |
+| Router / DNS | Empty |
+| Kindle IP | `192.168.15.244` |
 
-Use `RUNBOOK.md`'s diagnostics procedure to install the personalized rootfs,
-substituting `artifacts/dash-rootfs-ssh.img` for the canonical image in **both the
-write and read-back comparison**. Slice node: `seek=0`. Never write an MBR or
-raw sectors. Verify the matching read-back hash before booting main.
-
-Once the Mac recognizes a USB Ethernet network adapter, configure **that adapter
-only** in System Settings → Network:
-
-- IPv4: manually configured
-- Address: `192.168.15.201`
-- Mask: `255.255.255.0`
-- Router and DNS: empty
-
-Check for a subnet conflict with existing host networks before using these
-addresses. Do not replace the Mac's normal default route. Check the host-key
-fingerprint in `/var/log/dash.log` through diagnostics before accepting it on the
-Mac; the panel remains the primary output, not a fingerprint oracle.
+Check subnet conflicts. Leave normal default route alone.
+Verify host fingerprint in `/var/log/dash.log` via diagnostics before accepting.
+Private key stays on Mac.
 
 ```
-ssh -i /absolute/path/to/private-key root@192.168.15.244
-ssh -i /absolute/path/to/private-key root@192.168.15.244 'tail -f /var/log/dash.log'
+ssh -i /path/private-key root@192.168.15.244
+ssh -i /path/private-key root@192.168.15.244 'tail -f /var/log/dash.log'
 ```
 
-The private key stays on the Mac. For temporary test files, plain SSH streams
-work without an SFTP subsystem:
+No passwords. No forwarding. No telnet. No SFTP; modern `scp` not supported.
+File transfer:
 
 ```
-ssh -i /absolute/path/to/private-key root@192.168.15.244 'cat > /var/run/test.frame' < test.frame
+ssh -i /path/private-key root@192.168.15.244 'cat > /var/run/test.frame' < test.frame
 ```
 
-Dropbear alone does not supply SFTP, and modern `scp` defaults to SFTP; do not
-assume `scp` works. Official releases still come from the pinned tree/PR process,
-not from ad-hoc changes made through the maintenance shell.
+## Screen + failures
 
-## Validation and recovery
+Hello World/version/uptime/kernel stay. USB/SSH state + latest 20 log rows added.
+New output → refresh. Busy refresh → combine lines. Idle → no refresh.
 
-One variable per device cycle:
+- `USB: configured`: local interface ready. **Not proof Mac connected.**
+- `SSH: listening`: Dropbear owns USB port 22.
+- `disabled`: not provisioned. Run provisioning command.
+- `FAILED`: reason shown. Full details in log.
+- `TIMED OUT`: pending after ~20 seconds. Last stage shown. Recovery still watched.
 
-1. Unprovisioned image: confirm Hello World still paints and gadget modules load;
-   inspect logs and Mac USB Ethernet descriptors. No SSH should listen.
-2. Addressing: configure only the Mac USB adapter; test bidirectional IP traffic,
-   unplug/replug and absence of an added default route.
-3. Provisioned image: verify host fingerprint, approved-key shell/PTY and logs;
-   passwords and unrelated public keys must fail; forwarding must be refused.
-4. Reboot: host fingerprint remains stable. SSH restarts do not reload the USB
-   stack, and disconnect/reconnect restores access without repaint loops.
-5. Recovery: reboot to diagnostics and confirm unchanged disk export/read-back.
+Only `10-dash` paints. Conservative GC16 updates. Repeated flashes expected.
+No private keys/seeds printed. Dead kernel/dead panel cannot show feedback.
+USB broken? Boot diags. Read `/Volumes/dash-root/var/log/dash.log`.
 
-`make test` runs Rust and mocked-service checks; `make test-provision` exercises
-personalization/read-back and overwrite/reuse refusal on temporary copies after
-`make build`. Also run `make verify`, `make fingerprint`, `make rebuild-check`.
-Host tests cannot prove main-kernel USB behavior, entropy ioctl support, or PTYs
-on the device. Logs must say what failed, never announce unverified success.
+## Test + recover
 
-If USB never enumerates, inspect module errors and OTG state through diagnostics.
-The diagnostics kernel has USB fixes not necessarily in the main kernel; do not
-infer main support from diagnostics success or blindly port controller patches.
-Do not write `1` to `/proc/asession` (host mode). No live USB storage/network
-switching: diagnostics remains a separate boot target and recovery path.
+Host: `make test`, `make build`, `make test-provision`, `make verify`,
+`make fingerprint`, `make rebuild-check`.
 
-## References
+Device: one change per boot. Test gadget → IP → key login/PTY → reboot/reconnect
+→ diagnostics recovery. Wrong key/password/forwarding must fail.
 
-- [Upstream firmware-5.x USBNetwork (PW2 supported)](https://www.mobileread.com/forums/showthread.php?t=186645)
-- [NiLuJe's snapshots](https://www.mobileread.com/forums/showthread.php?t=225030)
-- [Dropbear](https://github.com/mkj/dropbear)
+Pinned modules: `fsl_otg_arc`, `arcotg_udc`, `g_ether`. Match `3.0.35-lab126`.
+Never force-load. Verify Mac CDC Ethernet; RNDIS alone proves nothing.
+Main and diags USB stacks differ. Diags works ≠ main works.
+Never write `1` to `/proc/asession` (host mode). No live storage/network switching.
+Multiple Kindles need unique seeds, keys, and MACs. SSH edits are not releases.
+
+Inputs: [pinned provenance](pinned-inputs.md).
+Upstream: [USBNetwork](https://www.mobileread.com/forums/showthread.php?t=186645),
+[snapshots](https://www.mobileread.com/forums/showthread.php?t=225030),
+[Dropbear](https://github.com/mkj/dropbear).
