@@ -50,7 +50,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /tmp/dash-build-image.tar
-        key: dash-build-${{ hashFiles('Containerfile') }}
+          key: dash-build-${{ hashFiles('Containerfile') }}
       - name: provide the build environment
         run: |
           set -euo pipefail

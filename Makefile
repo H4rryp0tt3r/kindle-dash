@@ -170,7 +170,7 @@ env-bump:
 	@cat $(LOCK)
 	@echo "== commit BUILD-IMAGE.lock in a PR; that bump is part of a version"
 
-bootstrap: env
+bootstrap: pins env
 
 # ---------------------------------------------------------------- build
 # verify is a prerequisite, not a suggestion: these are the bytes that get
@@ -179,7 +179,7 @@ bootstrap: env
 # it just fetched, and build.sh re-verifies in its own preflight so a direct
 # `./build.sh build` cannot skip it. Listing it a third time only prints the same
 # seven lines twice.
-build: unpack env
+build: pins unpack env
 	@$(HERE)/build.sh build
 
 # ---------------------------------------------------------------- test

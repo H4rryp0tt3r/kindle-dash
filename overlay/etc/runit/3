@@ -1,5 +1,5 @@
 #!/bin/busybox sh
-# Dash OS 0.1.0 -- /etc/runit/3 (stage 3, shutdown)
+# Dash OS -- /etc/runit/3 (stage 3, shutdown)
 # Best-effort clean stop. Reached on a runit-driven shutdown, or if stage 2
 # ever returns (which would mean the supervisor died).
 sync

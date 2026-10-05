@@ -1,17 +1,20 @@
-# Build & install runbook — 0.1.0
+# Build & install runbook
 
-The current version: an init system that runs and paints `Hello World!` on the
-panel. The chain is `stock MBR → main kernel (EPDC built in) → p1 ext3 rootfs →
+An init system that runs and paints `Hello World!` on the panel. The chain is `stock MBR → main kernel (EPDC built in) → p1 ext3 rootfs →
 runit (PID 1) → stage 1 → stage 2 → 10-dash → panel`.
 
 **Status: works on the device.** The panel shows:
 
 ```
 Hello World!
-Dash OS 0.1.0
+Dash OS <version>
 uptime 3s
 3.0.35-lab126
 ```
+
+`<version>` is `/etc/dash-release`, which the build generates from the repo's
+`VERSION` file — so the string on the panel is the version of the tree it was
+built from, never a literal written by hand.
 
 ## What is in it
 
@@ -39,10 +42,17 @@ frame**; it does not loop.
 make build
 ```
 
-See `../README.md`. The build refuses to emit an image whose boot path is not
-executable, whose mount points are missing, or which contains a VFPv4 binary.
+`make build` runs `make pins` first, which clones the **private
+`kindle-dash-pins` repo** at the tag matching this one and materialises the
+kernels, busybox, runit, the waveform and the stock U-Boot at the paths the
+build reads. Nothing binary is committed to this repository. See
+`../README.md`.
 
-Checks: `make verify`, `make fingerprint`, `make rebuild-check`.
+The build refuses to emit an image whose boot path is not executable, whose
+mount points are missing, whose filesystem `e2fsck` rejects, or which contains a
+VFPv4 binary.
+
+Checks: `make verify`, `make test`, `make fingerprint`, `make rebuild-check`.
 
 ## Install runbook
 

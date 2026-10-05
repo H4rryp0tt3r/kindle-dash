@@ -1,5 +1,5 @@
 #!/bin/busybox sh
-# Dash OS 0.1.0 -- /service/10-dash/run
+# Dash OS -- /service/10-dash/run
 #
 # The 0.1.0 deliverable: the init system runs and "Hello World!" is on the panel.
 #
@@ -19,6 +19,7 @@
 
 LOG=/var/log/dash.log
 FRAME=/var/run/dash.frame
+RELEASE=/etc/dash-release
 
 say() {
 	echo "$(cut -d. -f1 /proc/uptime 2>/dev/null)s  10-dash: $*" >>"$LOG"
@@ -26,11 +27,18 @@ say() {
 
 say "start"
 
+# The version comes from /etc/dash-release, which the build GENERATES from the
+# VERSION file at the repo root. It is not written here: a version literal in
+# this script is a second copy to forget, and this is the one the panel shows.
+REL=$(cat "$RELEASE" 2>/dev/null)
+[ -n "$REL" ] || REL="unknown"
+say "release $REL"
+
 {
 	echo
 	echo "  Hello World!"
 	echo
-	echo "  Dash OS 0.1.0"
+	echo "  Dash OS $REL"
 	echo "  uptime  $(cut -d. -f1 /proc/uptime 2>/dev/null)s"
 	echo "  $(cut -d' ' -f3 /proc/version 2>/dev/null)"
 } >"$FRAME" 2>>"$LOG"
