@@ -4,9 +4,12 @@
 #   build.sh [build]                    assemble artifacts/ from overlay/ + src/ + pins
 #   build.sh clean                      remove build outputs (keeps artifacts/)
 #   build.sh userland  <src> <out>      cross-compile *.rs (rustc)       (in the image)
+#   build.sh test      <srcdir>         run the userland unit tests      (in the image)
 #   build.sh rootfs    <stage> <img> [mb]   package an ext3 rootfs       (in the image)
 #   build.sh check-float <dir>...       refuse VFPv4-only binaries       (in the image)
 #   build.sh fingerprint <img> [img2]   content fingerprint of a rootfs  (in the image)
+#   build.sh lock-env  <image>          write BUILD-IMAGE.lock
+#   build.sh toolchain-fp <image>       rustc/gcc/mke2fs fingerprint of an image
 #   build.sh hashes    <dir> <name>...  write <dir>/SHA256SUMS
 #   build.sh verify    <dir>...         check each <dir>/SHA256SUMS
 #
@@ -58,9 +61,12 @@ Dash OS build tool.
   build.sh [build]                     assemble artifacts/
   build.sh clean                       remove build outputs
   build.sh userland  <src> <out>       cross-compile *.rs (in the image)
+  build.sh test      <srcdir>          run the userland unit tests (in the image)
   build.sh rootfs    <stage> <img> [mb] package an ext3 rootfs (in the image)
   build.sh check-float <dir>...        refuse VFPv4-only binaries (in the image)
   build.sh fingerprint <img> [img2]    content fingerprint (in the image)
+  build.sh lock-env  <image>           write BUILD-IMAGE.lock
+  build.sh toolchain-fp <image>        toolchain fingerprint of an image
   build.sh hashes    <dir> <name>...   write <dir>/SHA256SUMS
   build.sh verify    <dir>...          check each <dir>/SHA256SUMS
 EOF
@@ -158,7 +164,15 @@ cmd_rootfs() {
 
 	# Pin source mtimes (2026-01-01T00:00:00Z) so mke2fs -d stamps our files
 	# consistently. mke2fs's own inodes still get the wall clock.
-	find "$STAGE" -exec touch -h -d "@1767225600" {} + 2>/dev/null || true
+	#
+	# Two things learned here, both by removing a `|| true`:
+	#   * `-t YYYYMMDDhhmm` is the portable form. `@epoch` is a GNU extension;
+	#     BSD touch (macOS, the dev host) rejects it, and the error used to be
+	#     swallowed, so the mtimes were NEVER actually pinned here.
+	#   * TZ=UTC so the result does not depend on the builder's timezone.
+	# NOT `|| true` on purpose: a swallowed error here silently costs
+	# reproducibility, which is the exact thing this line exists to protect.
+	TZ=UTC find "$STAGE" -exec touch -h -t 202601010000 {} +
 
 	echo "=== rootfs: $STAGE -> $IMG (${SIZE_MB} MiB ext3) ==="
 
@@ -221,6 +235,17 @@ for d in proc sys dev tmp var/run var/log; do
 done
 lbl=$(dd if=/out/rootfs.img bs=1 skip=$((1024 + 120)) count=16 2>/dev/null | tr -d "\0")
 [ "$lbl" = "dash-root" ] || { echo "FAIL: label is \"$lbl\", want dash-root" >&2; fail=1; }
+
+# The image is about to be dd-ed onto a device, so prove the filesystem is
+# actually consistent before shipping it. mke2fs can exit 0 and still leave
+# something e2fsck wants to repair, and a rootfs that needs repair on first
+# mount is a bad boot with no useful diagnostics.
+if ! e2fsck -fn /out/rootfs.img >/tmp/dash-fsck.log 2>&1; then
+	echo "FAIL: e2fsck rejected the image:" >&2
+	tail -6 /tmp/dash-fsck.log >&2
+	fail=1
+fi
+
 [ $fail -eq 0 ] || exit 1
 echo "ROOTFS_OK" >&2
 cat /out/rootfs.img
@@ -236,6 +261,100 @@ cat /out/rootfs.img
 	mv -f "$IMG.new" "$IMG"
 	echo "built $IMG ($(wc -c <"$IMG" | tr -d ' ') bytes)"
 	echo "sha256 $(sha256 "$IMG")"
+}
+
+# ============================================================== test
+# Run the userland unit tests on the build image's HOST rustc. No Cargo, no
+# crates, no extra packages: `rustc --test` is enough, and it links against the
+# image's own glibc.
+#
+# The tests cover the pure logic only (record reading, fill length, font lookup,
+# geometry). Anything that needs /dev/fb0 is not a unit test.
+cmd_test() {
+	local SRC=${1:?usage: build.sh test <srcdir>}
+	SRC=$(cd "$SRC" && pwd)
+	command -v podman >/dev/null || { echo "podman required" >&2; exit 1; }
+	mkdir -p "$HERE/build"
+
+	echo "=== test: $SRC/*.rs ==="
+	COPYFILE_DISABLE=1 tar -C "$SRC" -cf - --no-xattrs . \
+	| podman run -i --rm --pull never "$DASH_BUILD_IMAGE" bash -c '
+set -euo pipefail
+mkdir -p /s/src /out
+COPYFILE_DISABLE=1 tar -C /s/src -xf -
+export PATH=/usr/bin:/usr/local/bin:$PATH
+rustc --version >&2
+n=0
+for r in /s/src/*.rs; do
+	b=$(basename "$r" .rs)
+	if grep -q "^#\[cfg(test)\]" "$r"; then
+		echo "--- $b" >&2
+		rustc --test -O --edition 2021 -o "/out/$b.test" "$r"
+		"/out/$b.test" --test-threads=1
+		n=$((n + 1))
+	else
+		echo "--- $b (no #[cfg(test)] module; nothing to run)" >&2
+	fi
+done
+[ "$n" -gt 0 ] || { echo "no test module found in any source file" >&2; exit 1; }
+echo "TEST_OK $n module(s)" >&2
+' 2>&1 | tee "$HERE/build/test.log" | grep -E '^(test |---|running|test result|TEST_OK|error|warning)'
+	grep -q '^TEST_OK' "$HERE/build/test.log" \
+		|| { echo "test run did not report success" >&2; exit 1; }
+	echo "test: ok (see $HERE/build/test.log)"
+}
+
+# ============================================================== lock-env
+# Write BUILD-IMAGE.lock for a built env image.
+#
+# The build environment is an artifact with a content digest, not a recipe that
+# is re-executed and trusted: the same Containerfile text yields different
+# packages once Ubuntu's archive moves on. `make env` compares the local image
+# against `id` and refuses to continue on a mismatch; `digest` is what makes it
+# pullable by anyone else (a locally built image has no manifest digest until
+# it is pushed, so that line may be absent).
+# The toolchain fingerprint: what the image actually provides, as opposed to what
+# the image file happens to hash to.
+#
+# NOT the config digest (`podman image inspect .Id`): that embeds the build
+# timestamp, so the same Containerfile built on two machines -- or the same image
+# restored from a CI cache -- yields a different id. Asserting on it fails for a
+# perfectly good image, which is worse than not asserting at all.
+#
+# These three are the inputs that actually change output bytes: the compiler, the
+# cross linker, and the tool that writes the filesystem. If Ubuntu moves any of
+# them, this string changes and `make env` says so.
+cmd_toolchain_fp() {
+	local IMG=${1:?usage: build.sh toolchain-fp <image>}
+	podman run --rm --pull never "$IMG" bash -c '
+		rustc --version
+		arm-linux-gnueabi-gcc -dumpversion
+		mke2fs -V 2>&1 | head -1
+	' 2>/dev/null | sed 's/[[:space:]]*$//' | tr '\n' '|'
+}
+
+cmd_lock_env() {
+	local IMG=${1:?usage: build.sh lock-env <image> [published]}
+	local PUBLISHED=${2:-no}
+	command -v podman >/dev/null || { echo "podman required" >&2; exit 1; }
+	local digest image tag
+	digest=$(podman image inspect --format '{{.Digest}}' "$IMG" 2>/dev/null || true)
+	tag=${IMG##*:}
+	image=$(sed -n 's/^image: //p' "$HERE/BUILD-IMAGE.lock" 2>/dev/null || true)
+	if [ -z "$image" ]; then
+		# Registry paths must be lowercase; a GitHub login is not.
+		image="ghcr.io/$(printf '%s' "${DASH_PINS_OWNER:-H4rryp0tt3r}" | tr 'A-Z' 'a-z')/dash-build"
+	fi
+	printf 'image: %s\n' "$image"
+	printf 'tag: %s\n' "$tag"
+	# podman reports a Digest even for an image that only ever existed on this
+	# machine, so the digest alone cannot say "someone else can pull this".
+	# `published` is the honest flag, and it is what gates the pull.
+	printf 'published: %s\n' "$PUBLISHED"
+	if [ -n "$digest" ] && [ "$digest" != "<no value>" ]; then
+		printf 'digest: %s\n' "$digest"
+	fi
+	printf 'toolchain: %s\n' "$(cmd_toolchain_fp "$IMG")"
 }
 
 # ============================================================== check-float
@@ -403,12 +522,27 @@ cmd_build() {
 	[ -f "$HERE/base-diag/$DIAG_KERNEL" ] || {
 		echo "missing $HERE/base-diag/$DIAG_KERNEL (run: make unpack)" >&2; exit 1; }
 
+	# The pins arrive from another repository over a network, so check them before
+	# anything consumes them. `make build` already depends on `verify`; this is the
+	# belt to that braces, so a direct `./build.sh build` cannot skip it either.
+	say "verify pinned inputs"
+	cmd_verify "$HERE/base-kernel" "$HERE/base-diag" \
+		"$HERE/third-party/busybox" "$HERE/third-party/runit" \
+		"$HERE/third-party/eink-firmware" >/dev/null
+
 	say "stage rootfs tree"
 	rm -rf "$STAGE" "$USRLAND"
 	mkdir -p "$STAGE" "$USRLAND"
 
 	# Authored content: the runit stages, the dashboard service and /etc.
 	COPYFILE_DISABLE=1 tar -C "$HERE/overlay" -cf - --no-xattrs . | COPYFILE_DISABLE=1 tar -C "$STAGE" -xf -
+
+	# VERSION is the single source of the version number. /etc/dash-release is
+	# GENERATED here, never authored: a hand-maintained copy is a second thing
+	# to forget, and the panel reads this file, so a stale copy makes the device
+	# report the wrong version while looking perfectly healthy.
+	mkdir -p "$STAGE/etc"
+	printf '%s\n' "$(cat "$HERE/VERSION")" > "$STAGE/etc/dash-release"
 
 	# The authored tree contains only what we author (no bin/, sbin/ or
 	# lib/firmware/imx/), so create those directories here -- before installing
@@ -504,9 +638,12 @@ case "${1:-build}" in
 	build)       shift; cmd_build "$@";;
 	clean)       rm -rf "$HERE/build"; rm -f "$ART"/*.build.log; echo "removed build outputs";;
 	userland)    shift; cmd_userland "$@";;
+	test)        shift; cmd_test "$@";;
 	rootfs)      shift; cmd_rootfs "$@";;
 	check-float) shift; cmd_check_float "$@";;
 	fingerprint) shift; cmd_fingerprint "$@";;
+	lock-env)    shift; cmd_lock_env "$@";;
+	toolchain-fp) shift; cmd_toolchain_fp "$@";;
 	hashes)      shift; cmd_hashes "$@";;
 	verify)      shift; cmd_verify "$@";;
 	-h|--help|help) usage;;
