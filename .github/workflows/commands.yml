@@ -31,6 +31,9 @@ jobs:
     name: command
     if: github.event.issue.pull_request
     runs-on: ubuntu-latest
+    # gh needs explicit authentication in Actions, even for reads/status writes.
+    env:
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
 
@@ -59,10 +62,25 @@ jobs:
         if: steps.cmd.outputs.cmd != ''
         env:
           AUTHOR: ${{ github.event.comment.user.login }}
+          ASSOC: ${{ github.event.comment.author_association }}
           REPO: ${{ github.repository }}
+          PERMISSION_TOKEN: ${{ secrets.DASH_RELEASE_TOKEN }}
         run: |
           set -euo pipefail
-          perm=$(gh api "repos/$REPO/collaborators/$AUTHOR/permission" --jq '.permission' 2>/dev/null || echo none)
+          # Trust GitHub's owner attribution. Other associations do not prove write access.
+          if [ "$ASSOC" = OWNER ]; then
+            echo "@$AUTHOR is OWNER; accepted"
+            exit 0
+          fi
+          [ -n "${PERMISSION_TOKEN:-}" ] || {
+            echo "::error::DASH_RELEASE_TOKEN is required to verify non-owner permissions"
+            exit 1
+          }
+          if ! perm=$(GH_TOKEN="$PERMISSION_TOKEN" gh api \
+            "repos/$REPO/collaborators/$AUTHOR/permission" --jq '.permission'); then
+            echo "::error::permission lookup failed; no authorization verdict recorded"
+            exit 1
+          fi
           case "$perm" in
             admin|maintain|write) echo "@$AUTHOR has '$perm'; accepted" ;;
             *) echo "::error::@$AUTHOR has '$perm' and may not use release commands"; exit 1 ;;
