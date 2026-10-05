@@ -145,7 +145,9 @@ GitHub withholds secrets from forks; bring the branch to this repository.
     `284d07f3…`.
 12. **Panel update params are conservative, always.** `hist_bw=0`, `hist_gray=0`,
     `temp=0`; the automatic-temperature + histogram path does not return. `screen`
-    has one update path on purpose.
+    has one update path on purpose. **Paint-once-per-boot is obsolete:** stream
+    boot output and refresh as lines/status arrive. `10-dash` remains the single
+    panel owner, coalesces output during refresh, and blocks while idle.
 13. **Nothing writes outside the filesystem.** No raw-LBA writes, ever. The eMMC
     below p1 holds the kernel images (main LBA 520–5868, diags LBA 29192–36571).
 14. **This CPU is a Cortex-A9 (VFPv3-D16), not VFPv4.** Any binary using
@@ -270,9 +272,14 @@ Build notes learned the hard way:
   and logs nothing**. Quote such names. This killed the entire release flow once;
   `ruby -ryaml` alone did not catch it, because Ruby parses it happily.
 
-## SSH plan (0.4.0)
+## USB maintenance SSH and future WiFi
 
-- **Over WiFi, not USB** (`usb0` g_ether SSH is superseded).
+- USB SSH for maintenance. WiFi later. No serial.
+- Pinned ARC gadget modules only. No force-load. Main: no mass storage. Diags: recovery.
+- Static Dropbear/dropbearkey pinned with source hash + external recipe. No C built here.
+- Release image: no keys/seeds. Provision separate image. One device. Never clone.
+- Bind `192.168.15.244:22`. No passwords/forwarding. Bad provisioning/entropy: SSH off, panel on.
+- Device state: dirs 0700, files 0600. Reflash removes it. Not part of release fingerprint.
 - WiFi needs stock `ath6kl_sdio.ko` + `cfg80211.ko` + `ath.ko` from
   `~/Documents/kindle-dash-assets/modules/` — ath6kl is compat-wireless, **not in
   the Amazon GPL drop** — so it only loads if the vermagic stays

@@ -4,9 +4,9 @@ Inputs a version consumes rather than produces: two kernels and the third-party
 binaries/firmware. Most have **no build recipe** anywhere, so the hashes are the
 identity.
 
-**These bytes are not in this repository.** They are Amazon firmware and
-tooling extracted from a Kindle, so they are not redistributable and live in the
-private **`kindle-dash-pins`** repo. `make pins` fetches the exact commit named in
+**These bytes are not in this repository.** Stock firmware/tooling extracted
+from a Kindle is not redistributable. Those bytes and the externally built SSH
+binaries live in the private **`kindle-dash-pins`** repo. `make pins` fetches the exact commit named in
 this repo, expands the `.gz` twins and drops them at the paths `build.sh` reads;
 `make verify` then checks every hash. Nothing below is committed here except
 `base-kernel/config-declared.txt` and `third-party/busybox/applets.txt`, which
@@ -33,6 +33,17 @@ the numbers are how they are recognised at a glance; sha256 is the check.
 All are static, ELF32 ARM EABI5 (the rootfs has no libc/loader, so a dynamic
 binary cannot run). `.gz` twins are committed in the pins repo, except the e-ink
 firmware which is already gzip and committed as-is.
+
+## USB maintenance inputs
+
+- `third-party/usbnet/`: verified stock `fsl_otg_arc`, `arcotg_udc`, `g_ether`.
+  Load in that order. Match `3.0.35-lab126`. No force-load or extra host drivers.
+- `third-party/dropbear/`: static Dropbear/dropbearkey 2026.94, musl 1.2.5,
+  bundled libtomcrypt/libtommath. Source hashes, external recipe, licenses in pins.
+  No C built here. No crates. Glibc candidate required Linux 3.2: rejected.
+- Passwords, forwarding, syslog compiled out. Logs go to stderr. No `-E` flag.
+- Build checks: static ARM, module vermagic, FPU. Hardware still untested.
+- Device keys/seeds not release inputs. Setup: [`USB-SSH.md`](USB-SSH.md).
 
 ## `base-kernel/` — pinned main-slot kernel
 

@@ -11,7 +11,15 @@ immutable, so a tag per release is an alias with nothing to add.
 
 ## [Unreleased]
 
-<!-- CHANGELOG-PLACEHOLDER -->
+### Added
+
+- Screen streams boot logs + USB/SSH status, errors, timeouts. Paint-once rule
+  removed. Single owner; idle blocks. SSH success requires verified socket.
+- USB Ethernet + key-only static Dropbear. No WiFi, serial, passwords, forwarding,
+  or main-boot disk export. Hardware untested.
+- Separate device provisioning. Release images have no keys/seeds. Rust entropy
+  helper, persistent host identity, private permissions, regression tests.
+- Short USB/SSH docs. Commands and safety checks kept.
 
 ## [0.2.1] — 2026-10-05
 

@@ -69,6 +69,7 @@ Dash OS build tool.
   build.sh toolchain-fp <image>        toolchain fingerprint of an image
   build.sh hashes    <dir> <name>...   write <dir>/SHA256SUMS
   build.sh verify    <dir>...          check each <dir>/SHA256SUMS
+  build.sh provision-ssh <pubkey> <img> <out>  personalise one image (host Python 3)
 EOF
 }
 
@@ -191,7 +192,14 @@ for d in bin sbin etc/runit; do
 	[ -d "/s/rootfs/$d" ] || continue
 	find "/s/rootfs/$d" -type f -exec chmod 755 {} +
 done
-find /s/rootfs/service -type f -name run -exec chmod 755 {} + 2>/dev/null || true
+find /s/rootfs/service -type f -name run -exec chmod 755 {} +
+chmod 600 /s/rootfs/etc/shadow
+chmod 700 /s/rootfs/root /s/rootfs/etc/dropbear /s/rootfs/var/lib/dash-ssh
+# A canonical artifact contains no per-device authentication or random state.
+if find /s/rootfs/etc/dropbear /s/rootfs/var/lib/dash-ssh -mindepth 1 | grep -q .; then
+    printf "FAIL: device credentials found in canonical staging tree\n" >&2
+    exit 1
+fi
 SIZE_MB='"$SIZE_MB"'
 dd if=/dev/zero of=/out/rootfs.img bs=1M count=$SIZE_MB 2>/dev/null
 mke2fs -q -F -t ext3 -m 0 -L dash-root -U '"$MKE2FS_UUID"' \
@@ -203,8 +211,9 @@ mke2fs -q -F -t ext3 -m 0 -L dash-root -U '"$MKE2FS_UUID"' \
 rm -rf /s/verify && mkdir -p /s/verify
 debugfs -R "rdump / /s/verify" /out/rootfs.img >/dev/null 2>&1
 fail=0
-for f in bin/busybox bin/screen sbin/runit \
-	 etc/runit/1 etc/runit/2 etc/runit/3; do
+for f in bin/busybox bin/screen bin/dash-status bin/ssh-seed bin/dropbearkey sbin/dropbear sbin/runit \
+	 etc/runit/1 etc/runit/2 etc/runit/3 \
+	 service/10-dash/run service/20-usbnet/run service/30-sshd/run; do
 	if [ ! -f "/s/verify/$f" ]; then
 		echo "FAIL: missing from image: /$f" >&2; fail=1
 	elif [ "$(stat -c %a "/s/verify/$f")" != "755" ]; then
@@ -232,6 +241,34 @@ done
 echo "services in image: $nsvc" >&2
 for d in proc sys dev tmp var/run var/log; do
 	[ -d "/s/verify/$d" ] || { echo "FAIL: missing mount point /$d" >&2; fail=1; }
+done
+for entry in "etc/shadow:600" "root:700" "etc/dropbear:700" "var/lib/dash-ssh:700"; do
+    path=${entry%:*}; mode=${entry#*:}
+    [ "$(stat -c %a /s/verify/$path)" = "$mode" ] && [ "$(stat -c %u:%g /s/verify/$path)" = 0:0 ] || { echo "FAIL: private mode/owner /$path" >&2; fail=1; }
+done
+for f in passwd group shadow shells; do
+    [ -s "/s/verify/etc/$f" ] || { echo "FAIL: missing account file $f" >&2; fail=1; }
+done
+for module in fsl_otg_arc arcotg_udc g_ether; do
+    f=/s/verify/lib/modules/3.0.35-lab126/$module.ko
+    [ -s "$f" ] || { echo "FAIL: missing module $module" >&2; fail=1; continue; }
+    arm-linux-gnueabi-readelf -p .modinfo "$f" | grep -q "vermagic=3.0.35-lab126 " || { echo "FAIL: module vermagic $module" >&2; fail=1; }
+done
+# Check the bytes extracted from the artifact, not just the staging executables.
+for f in bin/screen bin/dash-status bin/ssh-seed bin/dropbearkey sbin/dropbear; do
+    arm-linux-gnueabi-readelf -h "/s/verify/$f" > /tmp/elf-header
+    if ! grep -q "Machine:.*ARM" /tmp/elf-header || ! grep -q "Class:.*ELF32" /tmp/elf-header || grep -q "hard-float ABI" /tmp/elf-header; then
+        echo "FAIL: not ELF32 ARM soft-float $f" >&2; fail=1
+    fi
+    arm-linux-gnueabi-readelf -l "/s/verify/$f" > /tmp/elf-programs
+    arm-linux-gnueabi-readelf -d "/s/verify/$f" > /tmp/elf-dynamic
+    if grep -q INTERP /tmp/elf-programs || grep -q NEEDED /tmp/elf-dynamic; then
+        echo "FAIL: dynamic executable $f" >&2; fail=1
+    fi
+    arm-linux-gnueabi-objdump -d "/s/verify/$f" > /tmp/disassembly
+    if grep -qE "\bvfma\.|\bvfms\.|\bvfnma\.|\bvfnms\." /tmp/disassembly; then
+        echo "FAIL: VFPv4 in artifact $f" >&2; fail=1
+    fi
 done
 lbl=$(dd if=/out/rootfs.img bs=1 skip=$((1024 + 120)) count=16 2>/dev/null | tr -d "\0")
 [ "$lbl" = "dash-root" ] || { echo "FAIL: label is \"$lbl\", want dash-root" >&2; fail=1; }
@@ -302,6 +339,13 @@ echo "TEST_OK $n module(s)" >&2
 	grep -q '^TEST_OK' "$HERE/build/test.log" \
 		|| { echo "test run did not report success" >&2; exit 1; }
 	echo "test: ok (see $HERE/build/test.log)"
+	COPYFILE_DISABLE=1 tar -C "$HERE" -cf - --no-xattrs overlay tests \
+	| podman run -i --rm --pull never "$DASH_BUILD_IMAGE" bash -c '
+set -euo pipefail
+mkdir -p /s && tar -C /s -xf -
+cd /s
+bash tests/runtime.sh
+'
 }
 
 # ============================================================== lock-env
@@ -383,7 +427,7 @@ cmd_check_float() {
 			| tar -C "$TMP/$(basename "$d")" -xf -
 	done
 
-	tar -C "$TMP" -cf - . | podman run -i --rm --pull never "$DASH_BUILD_IMAGE" bash -c '
+	COPYFILE_DISABLE=1 tar -C "$TMP" -cf - --no-xattrs . | podman run -i --rm --pull never "$DASH_BUILD_IMAGE" bash -c '
 set -euo pipefail
 mkdir -p /scan && tar -C /scan -xf -
 cd /scan
@@ -392,12 +436,11 @@ while IFS= read -r f; do
 	[ -f "$f" ] || continue
 	magic=$(head -c 4 "$f" 2>/dev/null | od -A n -t x1 | tr -d " \n")
 	[ "$magic" = "7f454c46" ] || continue
-	bad=$(arm-linux-gnueabi-objdump -d "$f" 2>/dev/null \
-		| grep -oE "\bvfma\.|\bvfms\.|\bvfnma\.|\bvfnms\." | head -1 || true)
+	arm-linux-gnueabi-objdump -d "$f" > /tmp/dash-disassembly
+	bad=$(grep -oE "\bvfma\.|\bvfms\.|\bvfnma\.|\bvfnms\." /tmp/dash-disassembly | head -1 || true)
 	if [ -n "$bad" ]; then
 		echo "FAIL: $f uses VFPv4 instruction \"$bad\" (CPU is VFPv3-D16)" >&2
-		arm-linux-gnueabi-objdump -d "$f" 2>/dev/null \
-			| grep -E "\bvfma\.|\bvfms\.|\bvfnma\.|\bvfnms\." | head -3 >&2
+		grep -E "\bvfma\.|\bvfms\.|\bvfnma\.|\bvfnms\." /tmp/dash-disassembly | head -3 >&2
 		rc=1
 	fi
 done < <(find . -type f | sort)
@@ -528,7 +571,8 @@ cmd_build() {
 	say "verify pinned inputs"
 	cmd_verify "$HERE/base-kernel" "$HERE/base-diag" \
 		"$HERE/third-party/busybox" "$HERE/third-party/runit" \
-		"$HERE/third-party/eink-firmware" >/dev/null
+		"$HERE/third-party/eink-firmware" "$HERE/recovery" \
+		"$HERE/third-party/dropbear" "$HERE/third-party/usbnet" >/dev/null
 
 	say "stage rootfs tree"
 	rm -rf "$STAGE" "$USRLAND"
@@ -555,6 +599,15 @@ cmd_build() {
 	# Our own code, cross-compiled here.
 	cmd_userland "$HERE/src" "$USRLAND"
 	install -m 0755 "$USRLAND/screen" "$STAGE/bin/screen"
+	install -m 0755 "$USRLAND/dash-status" "$STAGE/bin/dash-status"
+	install -m 0755 "$USRLAND/ssh-seed" "$STAGE/bin/ssh-seed"
+	install -m 0755 "$HERE/third-party/dropbear/dropbear" "$STAGE/sbin/dropbear"
+	install -m 0755 "$HERE/third-party/dropbear/dropbearkey" "$STAGE/bin/dropbearkey"
+	mkdir -p "$STAGE/lib/modules/3.0.35-lab126" "$STAGE/etc/dropbear" "$STAGE/var/lib/dash-ssh"
+	local module
+	for module in fsl_otg_arc arcotg_udc g_ether; do
+		install -m 0644 "$HERE/third-party/usbnet/$module.ko" "$STAGE/lib/modules/3.0.35-lab126/$module.ko"
+	done
 
 	# Pinned third-party binaries.
 	install -m 0755 "$HERE/third-party/busybox/busybox" "$STAGE/bin/busybox"
@@ -586,6 +639,8 @@ cmd_build() {
 	# /etc/runit is a directory, and 0644 on it makes it untraversable).
 	find "$STAGE" -type d -exec chmod 0755 {} +
 	find "$STAGE/etc" -maxdepth 1 -type f -exec chmod 0644 {} +
+	chmod 0600 "$STAGE/etc/shadow"
+	chmod 0700 "$STAGE/root" "$STAGE/etc/dropbear" "$STAGE/var/lib/dash-ssh"
 
 	echo "staged $(find "$STAGE" -type f | wc -l | tr -d ' ') files into $STAGE"
 
@@ -608,7 +663,7 @@ cmd_build() {
 	# Guard the failure mode that has cost the most time: a binary built for a
 	# newer FPU than this CPU has. Runs on the staged tree, before packaging.
 	say "check for VFPv4-only instructions (CPU is VFPv3-D16)"
-	cmd_check_float "$STAGE/bin" "$STAGE/sbin"
+	cmd_check_float "$STAGE/bin" "$STAGE/sbin" "$STAGE/lib/modules"
 
 	say "stage kernels"
 	install -m 0644 "$HERE/base-kernel/$MAIN_KERNEL" "$ART/$MAIN_KERNEL"
@@ -646,6 +701,7 @@ case "${1:-build}" in
 	toolchain-fp) shift; cmd_toolchain_fp "$@";;
 	hashes)      shift; cmd_hashes "$@";;
 	verify)      shift; cmd_verify "$@";;
+	provision-ssh) shift; python3 "$HERE/tools/provision.py" "$@" --image "$DASH_BUILD_IMAGE";;
 	-h|--help|help) usage;;
 	*) echo "unknown command: $1" >&2; usage >&2; exit 1;;
 esac

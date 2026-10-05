@@ -1,4 +1,5 @@
 .DS_Store
+.claude/worktrees/
 
 # Big stock dumps -- kept on disk only
 /update_kindle_paperwhite_v2_5.12.2.2.bin
@@ -13,7 +14,7 @@
 # Every pinned input -- kernels, busybox, runit, the e-ink waveform, the stock
 # U-Boot -- is Amazon firmware extracted from a device, so it is not
 # redistributable and is kept in the private kindle-dash-pins repo instead.
-# `make pins` clones that repo at the matching tag and materialises the raw
+# `make pins` fetches the PINS.lock commit and materialises the raw
 # files here; `build.sh` then reads these exact paths, unchanged.
 #
 # A Dash OS release is therefore two SHAs (code + pins), and both are recorded
@@ -35,6 +36,13 @@
 /third-party/busybox/SHA256SUMS
 /third-party/runit/
 /third-party/eink-firmware/
+/third-party/dropbear/
+/third-party/usbnet/
+
+# Local provisioned images, entropy seeds, and host private keys are never inputs.
+*.seed
+*host_key
+*.personalised.img
 
 # Patched U-Boot is byte-for-byte regenerable from the tracked stock binary via
 # recovery/mk-patched-fastboot.py, so keep only the regenerated copy on disk.
