@@ -16,7 +16,7 @@
 # and the stock U-Boot live in the private kindle-dash-pins repo; `make pins`
 # materialises them at the paths build.sh already reads.
 #
-# A release is two SHAs -- this repo and the pins repo, both at the same tag.
+# A release is two SHAs -- this repo's tag and the commit named in PINS.lock.
 # See CHANGELOG.md.
 
 SHELL := /bin/bash
@@ -47,17 +47,24 @@ RAW_INPUTS := \
 	$(HERE)/base-kernel/main-uImage \
 	$(HERE)/base-diag/diag-uImage \
 	$(HERE)/third-party/busybox/busybox \
-	$(HERE)/third-party/runit/runit
+	$(HERE)/third-party/runit/runit \
+	$(HERE)/third-party/dropbear/dropbear \
+	$(HERE)/third-party/dropbear/dropbearkey \
+	$(HERE)/third-party/usbnet/fsl_otg_arc.ko \
+	$(HERE)/third-party/usbnet/arcotg_udc.ko \
+	$(HERE)/third-party/usbnet/g_ether.ko
 
 .PHONY: help pins bootstrap env env-bump unpack build test verify fingerprint \
-        rebuild-check shell clean current
+        rebuild-check shell clean current provision-ssh test-provision
 
 help:
 	@echo "Dash OS -- version $$(cat $(HERE)/VERSION 2>/dev/null || echo none)"
 	@echo ""
 	@echo "  make build            build artifacts/ (ensures pins + env)"
 	@echo "  make pins             fetch the pinned binary inputs named in PINS.lock"
-	@echo "  make test             unit tests for the userland renderer"
+	@echo "  make test             userland and mocked service tests"
+	@echo "  make provision-ssh PUBKEY=/path/key.pub   personalise a copy for one device"
+	@echo "  make test-provision   test personalisation (requires a built rootfs)"
 	@echo "  make bootstrap        prepare only: pins + the env image"
 	@echo "  make env              provide the build-environment image"
 	@echo "  make env-bump         rebuild + republish the env image, re-pin its digest"
@@ -195,7 +202,17 @@ verify:
 	@$(HERE)/build.sh verify \
 		$(HERE)/base-kernel $(HERE)/base-diag \
 		$(HERE)/third-party/busybox $(HERE)/third-party/runit \
-		$(HERE)/third-party/eink-firmware $(HERE)/recovery
+		$(HERE)/third-party/eink-firmware $(HERE)/recovery \
+		$(HERE)/third-party/dropbear $(HERE)/third-party/usbnet
+
+# Personalisation is separate: the canonical release image never contains keys.
+# PUBKEY must be an explicit OpenSSH Ed25519 public-key file, never a private key.
+provision-ssh: env
+	@test -n "$(PUBKEY)" || { printf 'usage: make provision-ssh PUBKEY=/path/key.pub\n' >&2; exit 1; }
+	@$(HERE)/build.sh provision-ssh "$(PUBKEY)" "$(ART)/dash-rootfs.img" "$(ART)/dash-rootfs-ssh.img"
+
+test-provision: env
+	@bash "$(HERE)/tests/provision.sh"
 
 fingerprint: env
 	@$(HERE)/build.sh fingerprint $(ART)/dash-rootfs.img

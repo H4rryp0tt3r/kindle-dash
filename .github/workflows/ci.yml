@@ -124,11 +124,12 @@ jobs:
             exit 1
           fi
           make pins
-      - name: build the rootfs and fingerprint it
+      - name: build, test provisioning, and fingerprint the rootfs
         env:
           DASH_PINS_TOKEN: ${{ secrets.DASH_PINS_TOKEN }}
         run: |
           make build
+          make test-provision
           make fingerprint | tee /tmp/fingerprint.txt
       - name: cache the image for the next run
         run: |

@@ -7,16 +7,20 @@ widget dashboard. There is no serial console; the panel and
 `/var/log/dash.log` are the only output.
 
 **Status:** the init system comes up and `Hello World!` renders on the panel.
+USB Ethernet and key-only maintenance SSH are implemented for validation; actual
+main-kernel gadget enumeration and SSH still require a device test. See
+[`docs/USB-SSH.md`](docs/USB-SSH.md) for provisioning and connection instructions.
 
 ## Build
 
-Requires `podman` and `make` (x86_64 Linux or macOS). Everything runs inside the
-container image defined by `Containerfile`.
+Requires `podman` and `make` (Linux or macOS). Build/test tooling runs inside the
+container image defined by `Containerfile`. Personalised SSH images additionally
+require Python 3 on the host; their credentials never enter the build context.
 
 ```
 make pins           # fetch the binary inputs from the private pins repo
 make build          # build artifacts/ (also fetches pins + the env image)
-make test           # unit tests for the renderer
+make test           # Rust unit tests and mocked service checks
 make verify         # check the pinned inputs against SHA256SUMS
 make fingerprint    # print the rootfs content fingerprint
 make rebuild-check  # prove two builds carry identical content
@@ -29,7 +33,7 @@ not committed — the pinned inputs plus `overlay/` and `src/` are the version.
 **No binaries are committed here.** The kernels, busybox, runit, the e-ink
 waveform and the stock U-Boot are Amazon firmware extracted from a device, so
 they are not redistributable. They live in the private **`kindle-dash-pins`**
-repo; `make pins` clones it at the matching tag and drops the files where
+repo; `make pins` fetches the commit in `PINS.lock` and drops the files where
 `build.sh` expects them. A release is therefore **two SHAs** — this repo's tag, and
 the exact pins commit named in `PINS.lock`. The pins repo has no tags: a commit
 SHA is already immutable, so it needs no alias per release to fall out of sync.

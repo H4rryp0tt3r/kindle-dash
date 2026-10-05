@@ -4,9 +4,9 @@ Inputs a version consumes rather than produces: two kernels and the third-party
 binaries/firmware. Most have **no build recipe** anywhere, so the hashes are the
 identity.
 
-**These bytes are not in this repository.** They are Amazon firmware and
-tooling extracted from a Kindle, so they are not redistributable and live in the
-private **`kindle-dash-pins`** repo. `make pins` fetches the exact commit named in
+**These bytes are not in this repository.** Stock firmware/tooling extracted
+from a Kindle is not redistributable. Those bytes and the externally built SSH
+binaries live in the private **`kindle-dash-pins`** repo. `make pins` fetches the exact commit named in
 this repo, expands the `.gz` twins and drops them at the paths `build.sh` reads;
 `make verify` then checks every hash. Nothing below is committed here except
 `base-kernel/config-declared.txt` and `third-party/busybox/applets.txt`, which
@@ -33,6 +33,27 @@ the numbers are how they are recognised at a glance; sha256 is the check.
 All are static, ELF32 ARM EABI5 (the rootfs has no libc/loader, so a dynamic
 binary cannot run). `.gz` twins are committed in the pins repo, except the e-ink
 firmware which is already gzip and committed as-is.
+
+## USB maintenance inputs
+
+`third-party/usbnet/` holds the raw-byte hashes and gzipped twins for exactly
+`fsl_otg_arc.ko`, `arcotg_udc.ko`, and `g_ether.ko`, taken from the verified stock
+asset shelf. The stock module metadata gives g_ether a dependency on arcotg_udc;
+OTG support is loaded first for controller registration. Match `3.0.35-lab126`;
+never force-load these modules or add host-controller drivers speculatively.
+
+`third-party/dropbear/` supplies externally built **static** Dropbear/dropbearkey
+with upstream release/source hash, external compiler/flags and license notices.
+Dash compiles no C and adds no crates. These pins use Dropbear 2026.94 with
+static musl 1.2.5 and bundled libtomcrypt/libtommath; system glibc/crypto is not
+linked. The external glibc candidate required Linux 3.2 and was rejected. Syslog,
+password authentication and forwarding are compiled out (stderr logging is
+unconditional, so this server has no `-E` flag). Build checks reject dynamic ARM
+executables, wrong module vermagic and unsupported FPU instructions. Actual
+Linux 3.0.35 runtime compatibility must still be tested on hardware.
+
+Per-device keys and trusted entropy seeds are generated separately and are not
+pinned release inputs. See [`USB-SSH.md`](USB-SSH.md).
 
 ## `base-kernel/` — pinned main-slot kernel
 

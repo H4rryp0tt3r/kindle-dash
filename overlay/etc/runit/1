@@ -27,13 +27,22 @@
 mount -t proc     proc     /proc
 mount -t sysfs    sysfs    /sys
 mount -t devtmpfs devtmpfs /dev
-mount -t tmpfs    tmpfs    /var/run
+mount -t tmpfs -o mode=0755 tmpfs /var/run
 
 log() {
 	echo "$(cut -d. -f1 /proc/uptime 2>/dev/null)s  stage1: $*" >>/var/log/dash.log
 }
 
 log "start, mounts up (proc sys dev, tmpfs on /var/run)"
+
+# devtmpfs hides authored /dev entries, so create the PTY mount point now.
+log "mounting devpts for SSH terminals"
+if mkdir -p /dev/pts && mount -t devpts -o mode=0620,gid=0 devpts /dev/pts; then
+	log "devpts mounted"
+else
+	log "devpts unavailable; SSH stays disabled"
+fi
+[ -c /dev/ptmx ] || log "no /dev/ptmx; SSH stays disabled"
 
 # Keep the EPDC powered between updates. The probe default (pwrdown_delay=0)
 # power-cycles the panel after every update, which corrupts a stream of updates.

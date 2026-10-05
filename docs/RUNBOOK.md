@@ -26,9 +26,13 @@ built from, never a literal written by hand.
 | stage 3 | `/etc/runit/3` — sync + unmount |
 | service | `10-dash` — paints the panel once, then parks |
 | renderer | `bin/screen` — 8x8 font, scale 2, one conservative GC16 update |
-| rootfs | 64 MiB ext3, label `dash-root`, no libc, no kernel modules |
+| USB network | `20-usbnet` — stock gadget stack, static USB address |
+| maintenance SSH | `30-sshd` — key-only Dropbear; disabled until provisioned |
+| rootfs | 64 MiB ext3, label `dash-root`, no shared libc or loader |
 
-No kernel modules: the EPDC driver is built in, so `/dev/fb0` exists before
+USB provisioning and Mac configuration: [`USB-SSH.md`](USB-SSH.md). Main-kernel
+USB behavior still needs hardware validation; the working panel baseline remains.
+The EPDC driver is built in, so `/dev/fb0` exists before
 userspace runs. Stage 1 keeps the EPDC powered (`echo -1 > …/mxc_epdc_pwrdown`)
 and writes nothing outside the filesystem.
 

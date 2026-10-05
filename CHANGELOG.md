@@ -70,6 +70,15 @@ immutable, so a tag per release is an alias with nothing to add.
 
 ### Added
 
+- USB Ethernet maintenance access using the pinned stock ARC gadget modules and
+  a separate runit service, without WiFi, serial, mass-storage export, or changes
+  to the panel service. Hardware enumeration still requires device validation.
+- Key-only static Dropbear SSH, a devpts-backed maintenance shell, and explicit
+  per-device image provisioning. Release images contain no authorized keys,
+  private host keys, or entropy seeds; missing provisioning fails closed.
+- A Rust entropy-seed helper for the old kernel, secure persistent host identity,
+  private artifact mode checks, and runtime/provisioning regression tests.
+
 - `release-finalize.yml` accepts `workflow_dispatch` with a version, to finish a
   release whose commit is already on `main`. The bump kind is derived from the jump
   rather than typed in, so an operator cannot ask for a patch and get a major.

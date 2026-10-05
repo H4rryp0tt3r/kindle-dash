@@ -177,7 +177,8 @@ from the stock p1 rootfs, kept in a sibling directory:
 └── ar6k/                    ath6kl WiFi firmware + cal files
 ```
 
-Bulky, not built by us, needed only from 0.3.0 (WiFi). Copy the specific files a
+Bulky, not built by us. USB maintenance now pins only `fsl_otg_arc`, `arcotg_udc`
+and `g_ether` from this shelf; future WiFi needs separate inputs. Copy the specific files a
 version needs — not the whole shelf. They are single-copy and largely
 irreplaceable (the compat-wireless modules have no GPL source), so **keep the
 directory backed up**; verify with `shasum -a 256 -c SHA256SUMS`.

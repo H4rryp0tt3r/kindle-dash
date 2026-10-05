@@ -270,9 +270,20 @@ Build notes learned the hard way:
   and logs nothing**. Quote such names. This killed the entire release flow once;
   `ruby -ryaml` alone did not catch it, because Ruby parses it happily.
 
-## SSH plan (0.4.0)
+## USB maintenance SSH and future WiFi
 
-- **Over WiFi, not USB** (`usb0` g_ether SSH is superseded).
+- **SSH over USB Ethernet** is the maintenance/debug channel; future WiFi is an
+  operational network, not a prerequisite for debugging it. No serial, ever.
+- Load only the pinned ARC gadget dependency closure; no forced module loading.
+  Main boots never export mass storage. Diagnostics remains independent recovery.
+- Dropbear/dropbearkey are static external builds, pinned as binaries with their
+  exact upstream source hash and external build recipe. No C is compiled here.
+- Canonical release images contain no device keys or seeds. Provision a separate
+  image with an explicit public key and fresh per-device seed; never clone it.
+- Passwords and forwarding are disabled. Bind only to `192.168.15.244:22`.
+  Missing provisioning or entropy disables SSH without blocking the panel.
+- Runtime seed/host-key state is private (0700 directories, 0600 files), outside
+  release fingerprints; flashing a canonical image removes that device state.
 - WiFi needs stock `ath6kl_sdio.ko` + `cfg80211.ko` + `ath.ko` from
   `~/Documents/kindle-dash-assets/modules/` — ath6kl is compat-wireless, **not in
   the Amazon GPL drop** — so it only loads if the vermagic stays

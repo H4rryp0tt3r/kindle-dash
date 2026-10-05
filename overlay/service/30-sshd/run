@@ -1,0 +1,98 @@
+#!/bin/busybox sh
+# Dash OS -- key-only SSH on the USB maintenance address, never on WiFi.
+# An unprovisioned image stays closed. Failure parks without disrupting the panel.
+PATH=/bin:/sbin
+export PATH
+umask 077
+LOG=/var/log/dash.log
+STATE=/var/lib/dash-ssh
+AUTH=/etc/dropbear/authorized_keys
+HOSTKEY=$STATE/dropbear_ed25519_host_key
+
+say() {
+	echo "$(cut -d. -f1 /proc/uptime 2>/dev/null)s  30-sshd: $*" >>"$LOG"
+}
+fail() {
+	say "unavailable: $*"
+	exec tail -f /dev/null 2>/dev/null
+}
+private_dir() {
+	[ -d "$1" ] && [ ! -L "$1" ] \
+		&& [ "$(stat -c '%u:%g:%a' "$1")" = 0:0:700 ]
+}
+private_file() {
+	[ -f "$1" ] && [ ! -L "$1" ] \
+		&& [ "$(stat -c '%u:%g:%a' "$1")" = 0:0:600 ]
+}
+uptime_s() {
+	read -r up rest </proc/uptime || return 1
+	printf '%s\n' "${up%%.*}"
+}
+
+say "start"
+private_dir /etc/dropbear && private_file "$AUTH" && [ -s "$AUTH" ] \
+	|| fail "no securely provisioned authorized_keys"
+private_dir "$STATE" && private_file "$STATE/seed" \
+	&& [ "$(wc -c <"$STATE/seed")" -eq 64 ] \
+	|| fail "no securely provisioned 64-byte seed"
+[ -c /dev/ptmx ] && grep -q ' /dev/pts devpts ' /proc/mounts \
+	|| fail "PTY devices are not ready"
+
+start=$(uptime_s) || fail "no uptime clock for USB readiness"
+deadline=$((start + 10))
+polls=0
+while [ ! -f /var/run/dash-usbnet-ready ]; do
+	[ ! -f /var/run/dash-usbnet-failed ] || fail "USB network setup failed; see 20-usbnet log"
+	now=$(uptime_s) || fail "lost uptime clock"
+	[ "$now" -lt "$deadline" ] && [ "$polls" -lt 10000 ] \
+		|| fail "USB network is not ready"
+	polls=$((polls + 1))
+done
+ip -4 addr show dev usb0 | grep -q 'inet 192\.168\.15\.244/24 ' \
+	|| fail "USB address is not ready"
+
+say "initializing entropy before SSH/key generation"
+/bin/ssh-seed >>"$LOG" 2>&1 || fail "entropy initialization failed"
+[ -f /var/run/dash-ssh-seeded ] || fail "entropy readiness was not recorded"
+[ ! -L "$HOSTKEY" ] || fail "host key permissions are unsafe"
+if [ ! -e "$HOSTKEY" ]; then
+	say "generating device-specific Ed25519 host key"
+	keydir=$(mktemp -d "$STATE/hostkey.XXXXXX") || fail "creating private key workspace failed"
+	if ! /bin/dropbearkey -t ed25519 -f "$keydir/key" >>"$LOG" 2>&1; then
+		rm -rf "$keydir"
+		fail "host key generation failed"
+	fi
+	chmod 600 "$keydir/key" || fail "setting host key mode failed"
+	sync
+	mv "$keydir/key" "$HOSTKEY" || fail "installing host key failed"
+	rmdir "$keydir"
+	sync
+fi
+private_file "$HOSTKEY" || fail "host key permissions are unsafe"
+say "checking host key; public fingerprint follows"
+public=$(/bin/dropbearkey -y -f "$HOSTKEY" 2>>"$LOG") \
+	|| fail "host key is invalid"
+printf '%s\n' "$public" | grep -q '^ssh-ed25519 ' \
+	|| fail "host key is not Ed25519"
+printf '%s\n' "$public" >>"$LOG"
+say "listening on USB 192.168.15.244:22; keys only, forwarding disabled"
+# Forward runit's stop signal to the foreground server. A server failure parks
+# instead of becoming an automatic rapid restart loop; USB remains untouched.
+pid=
+stop() {
+	trap - TERM INT HUP
+	if [ -n "$pid" ]; then
+		kill -TERM "$pid" 2>/dev/null
+		wait "$pid" 2>/dev/null
+	fi
+	exit 0
+}
+trap stop TERM INT HUP
+# Syslog is compiled out in this pin: stderr logging is unconditional (no -E).
+/sbin/dropbear -F -s -j -k -p 192.168.15.244:22 \
+	-r "$HOSTKEY" -D /etc/dropbear >>"$LOG" 2>&1 &
+pid=$!
+wait "$pid"
+rc=$?
+trap - TERM INT HUP
+fail "SSH server returned rc=$rc; restart the service after investigating"
