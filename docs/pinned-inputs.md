@@ -1,12 +1,21 @@
 # Pinned inputs and provenance
 
 Inputs a version consumes rather than produces: two kernels and the third-party
-binaries/firmware. Most have **no build recipe** here, so the hashes are the
-identity. The build environment lives in `Containerfile`; busybox and runit stay
-pinned (extracted from the stock rootfs) — the only thing built from source is
-`screen`.
+binaries/firmware. Most have **no build recipe** anywhere, so the hashes are the
+identity.
 
-| what | file | md5 | size | recipe? |
+**These bytes are not in this repository.** They are Amazon firmware and
+tooling extracted from a Kindle, so they are not redistributable and live in the
+private **`kindle-dash-pins`** repo. `make pins` clones it at the tag matching
+this repo, expands the `.gz` twins and drops them at the paths `build.sh` reads;
+`make verify` then checks every hash. Nothing below is committed here except
+`base-kernel/config-declared.txt` and `third-party/busybox/applets.txt`, which
+are authored text.
+
+A release is therefore two SHAs — this repo at tag `X` and `kindle-dash-pins` at
+tag `X` — and the tag annotation records both, plus the rootfs fingerprint.
+
+| what | file (in the pins repo) | md5 | size | recipe? |
 |---|---|---|---|---|
 | main-slot kernel | `base-kernel/main-uImage` | `7c5638e9af30067023e21374b2220389` | 2,738,448 | no |
 | diags-slot kernel | `base-diag/diag-uImage` | `284d07f37eb5a344b373a34836d01b39` | 3,778,240 | no |
@@ -14,11 +23,16 @@ pinned (extracted from the stock rootfs) — the only thing built from source is
 | runit | `third-party/runit/runit` | `d8b8982960d145b7dede7dba68d21fc7` | 25,536 | no |
 | e-ink waveform | `third-party/eink-firmware/epdc_E60_V220.fw` | `30f926d983f27499aadcd5e7bcbcd0e4` | 38,050 | n/a |
 | panel default wf | `third-party/eink-firmware/default.fw.gz` | `f8c5acc97fd1e6bb8c1f12ad2301a1ed` | 650 | n/a |
+| stock U-Boot | `recovery/uboot_2009-08-…usb_fastboot.bin` | — | 119,652 | no |
+
+Identity is **sha256**, recorded in the `SHA256SUMS` beside each file over the
+**raw** (decompressed) bytes — the raw bytes are what gets `dd`-ed. The md5
+column is kept because the device-side read-back procedure is written in md5 and
+the numbers are how they are recognised at a glance; sha256 is the check.
 
 All are static, ELF32 ARM EABI5 (the rootfs has no libc/loader, so a dynamic
-binary cannot run). `SHA256SUMS` beside each records the RAW bytes; `.gz` twins
-are committed, except the e-ink firmware which is already gzip and committed
-as-is.
+binary cannot run). `.gz` twins are committed in the pins repo, except the e-ink
+firmware which is already gzip and committed as-is.
 
 ## `base-kernel/` — pinned main-slot kernel
 
@@ -110,23 +124,32 @@ the waveform before the rootfs. It is baked into the main kernel
 `lib/firmware/imx/epdc_E60_V220.fw`. Check before a device session:
 `md5 -q epdc_E60_V220.fw` → `30f926d983f27499aadcd5e7bcbcd0e4`.
 
-## Build toolchain (version-pinned, not hash-pinned)
+## Build environment
 
 The userland compiler is **Rust**, installed by `rustup` inside the build image.
 The base OS comes from the pinned `ubuntu` digest in `Containerfile`; the Rust
-toolchain is pinned by **version only**:
+toolchain is pinned by **version**:
 
 - `rustc 1.83.0` (`90b35a623` 2024-11-26), target `arm-unknown-linux-gnueabi`
 - installed from `https://sh.rustup.rs` with `--profile minimal`
 - `ARG RUST_TOOLCHAIN` in `Containerfile` is where the version lives
+
+The **image itself** is a pinned input, not a recipe to re-execute. The same
+`Containerfile` text yields different `apt` packages once Ubuntu's archive moves
+on, so `BUILD-IMAGE.lock` records the image id and its registry digest, `make
+env` refuses to build against anything else, and `make env-bump` (rebuild,
+republish, re-pin) is the only supported way to change it.
 
 There is no `Cargo.lock` and no vendored crate, because `src/` has **no external
 dependencies** -- `screen.rs` declares `open`/`close`/`mmap`/`munmap`/`ioctl`
 itself. That is deliberate: it keeps `make build` offline and removes the one
 thing that could make identical inputs produce a different binary.
 
-Consequence: the userland binary's exact bytes depend on the rustc version, so a
-`rustup` upgrade is a visible change and belongs in its own version bump.
 `arm-unknown-linux-gnueabi` is soft-float, the only float ABI this CPU has
 (golden rule 14), and `build.sh check-float` proves it on every build rather
 than trusting the target triple.
+
+A rustc bump changes the userland binary's bytes but is **not** device-visible,
+so by the versioning rules it is not a minor release on its own. It rides along
+with whatever release next carries it; the point at which a toolchain change
+becomes interesting is the fingerprint moving, not the version number.

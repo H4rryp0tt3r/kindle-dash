@@ -1,34 +1,51 @@
 .DS_Store
 
-# Big stock binaries / source dumps -- kept on disk only
+# Big stock dumps -- kept on disk only
 /update_kindle_paperwhite_v2_5.12.2.2.bin
 /Kindle_src_5.12.2.2/
 /ota_extract/
 /backups/
 /*.img
 
+# ---------------------------------------------------------------- Dash OS
+# NO BINARIES LIVE IN THIS REPOSITORY.
+#
+# Every pinned input -- kernels, busybox, runit, the e-ink waveform, the stock
+# U-Boot -- is Amazon firmware extracted from a device, so it is not
+# redistributable and is kept in the private kindle-dash-pins repo instead.
+# `make pins` clones that repo at the matching tag and materialises the raw
+# files here; `build.sh` then reads these exact paths, unchanged.
+#
+# A Dash OS release is therefore two SHAs (code + pins), and both are recorded
+# in the tag annotation.
+#
+# Everything below arrives from `make pins` and is never authored here: the
+# decompressed raw twins, the .gz twins, and the SHA256SUMS manifests that
+# `build.sh verify` reads. base-kernel/config-declared.txt and
+# third-party/busybox/applets.txt are authored text and ARE tracked.
+/.pins/
+/base-kernel/main-uImage
+/base-kernel/main-uImage.gz
+/base-kernel/SHA256SUMS
+/base-diag/diag-uImage
+/base-diag/diag-uImage.gz
+/base-diag/SHA256SUMS
+/third-party/busybox/busybox
+/third-party/busybox/busybox.gz
+/third-party/busybox/SHA256SUMS
+/third-party/runit/
+/third-party/eink-firmware/
+
 # Patched U-Boot is byte-for-byte regenerable from the tracked stock binary via
 # recovery/mk-patched-fastboot.py, so keep only the regenerated copy on disk.
 /recovery/uboot_diags2fastboot.bin
 
-# ---------------------------------------------------------------- Dash OS
-# Pinned inputs are committed as .gz twins, with SHA256SUMS recording the hash of
-# the RAW bytes -- the raw hash is what matters, because it is what gets dd-ed to
-# the device. The raw files stay on disk untracked so flashing needs no
-# decompression step.
-#
-# Exception: the e-ink firmware is ALREADY gzip, so it is tracked as it stands;
-# there is no second .gz layer (that produced the old default.fw.gz.gz).
-#
-# Raw twins of the gzipped pinned inputs:
-/base-kernel/main-uImage
-/base-diag/diag-uImage
-/third-party/busybox/busybox
-/third-party/runit/runit
+# The stock U-Boot and its manifest also arrive from the pins repo.
+/recovery/uboot_2009-08-lab126_wario_usb_fastboot.bin
+/recovery/SHA256SUMS
 
 # Build outputs are NOT committed. A tagged commit plus the pinned inputs IS the
-# version; `make build` regenerates these from overlay/ + src/ + the pins. This
-# is what keeps a 64 MiB rootfs image out of git.
+# version; `make build` regenerates these from overlay/ + src/ + the pins.
 /build/
 /artifacts/
 

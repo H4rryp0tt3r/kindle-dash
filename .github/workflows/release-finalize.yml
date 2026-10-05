@@ -35,10 +35,6 @@ jobs:
   finalize:
     name: finalize
     runs-on: ubuntu-latest
-    # `gh` refuses to run in Actions without GH_TOKEN (exit 4). Job level, so no
-    # step has to remember it.
-    env:
-      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
         with:
