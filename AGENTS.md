@@ -145,7 +145,9 @@ GitHub withholds secrets from forks; bring the branch to this repository.
     `284d07f3…`.
 12. **Panel update params are conservative, always.** `hist_bw=0`, `hist_gray=0`,
     `temp=0`; the automatic-temperature + histogram path does not return. `screen`
-    has one update path on purpose.
+    has one update path on purpose. **Paint-once-per-boot is obsolete:** stream
+    boot output and refresh as lines/status arrive. `10-dash` remains the single
+    panel owner, coalesces output during refresh, and blocks while idle.
 13. **Nothing writes outside the filesystem.** No raw-LBA writes, ever. The eMMC
     below p1 holds the kernel images (main LBA 520–5868, diags LBA 29192–36571).
 14. **This CPU is a Cortex-A9 (VFPv3-D16), not VFPv4.** Any binary using

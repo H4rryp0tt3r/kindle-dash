@@ -1,8 +1,8 @@
 # USB maintenance SSH
 
 SSH over USB Ethernet is a development/maintenance connection independent of
-WiFi. It is not serial and does not export a disk. The panel still paints once;
-logs still live at `/var/log/dash.log`. **Implementation is not a claim of device
+WiFi. It is not serial and does not export a disk. The panel streams current-boot
+logs and USB/SSH status; full logs still live at `/var/log/dash.log`. **Implementation is not a claim of device
 validation:** the pinned main kernel must actually load these stock modules and
 enumerate CDC Ethernet on the Mac before this is considered working hardware.
 
@@ -24,6 +24,37 @@ The stock gadget advertises Ethernet; verify actual CDC descriptors and macOS
 recognition. RNDIS compiled into the module does not prove Mac support. MACs are
 fixed locally administered addresses for this single-device setup; multiple
 Kindles require distinct addresses and individual provisioning.
+
+## Panel feedback
+
+The panel retains Hello World/version/uptime/kernel, adds USB and SSH state, and
+shows up to the latest 20 wrapped lines of current-boot output. It refreshes on new
+lines/status changes, not on a timer; lines arriving during a full e-ink update
+are coalesced into the next frame. Repeated GC16 flashes are intentional.
+
+Examples:
+
+```
+USB: configured - 192.168.15.244/24
+SSH: listening - key authentication only
+```
+
+```
+USB: FAILED - loading arcotg_udc failed
+SSH: FAILED - USB network setup failed
+```
+
+Unprovisioned images show `SSH: disabled - not provisioned`. Setup that stalls
+shows `TIMED OUT` with its last reported stage after approximately 20 seconds,
+while the panel continues monitoring later recovery. `USB: configured` means
+Kindle-side configuration only, not verified Mac enumeration or connectivity.
+`SSH: listening` requires the running Dropbear child to own the exact USB TCP
+listening socket; an early bind/process failure cannot appear as success.
+
+Only `10-dash` invokes the renderer. Its own diagnostic lines are excluded from
+the stream to prevent feedback/repaint loops. Full logs remain recoverable from
+diagnostics even if USB/SSH fails. Kernel failures before userspace or failures
+of the panel itself cannot be reported by this userspace console.
 
 ## Provision one device
 

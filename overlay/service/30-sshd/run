@@ -8,12 +8,17 @@ LOG=/var/log/dash.log
 STATE=/var/lib/dash-ssh
 AUTH=/etc/dropbear/authorized_keys
 HOSTKEY=$STATE/dropbear_ed25519_host_key
+STATUS=/var/run/dash-sshd.status
+status() {
+	printf '%s\n%s\n' "$1" "$2" >"$STATUS.new" && mv "$STATUS.new" "$STATUS"
+}
 
 say() {
 	echo "$(cut -d. -f1 /proc/uptime 2>/dev/null)s  30-sshd: $*" >>"$LOG"
 }
 fail() {
 	say "unavailable: $*"
+	status failed "$*" || say "could not publish panel status"
 	exec tail -f /dev/null 2>/dev/null
 }
 private_dir() {
@@ -30,6 +35,12 @@ uptime_s() {
 }
 
 say "start"
+status starting "checking provisioning" || fail "could not publish panel status"
+if [ ! -e "$AUTH" ] && [ ! -L "$AUTH" ]; then
+	say "disabled: not provisioned; use make provision-ssh"
+	status disabled "not provisioned" || say "could not publish panel status"
+	exec tail -f /dev/null 2>/dev/null
+fi
 private_dir /etc/dropbear && private_file "$AUTH" && [ -s "$AUTH" ] \
 	|| fail "no securely provisioned authorized_keys"
 private_dir "$STATE" && private_file "$STATE/seed" \
@@ -38,6 +49,7 @@ private_dir "$STATE" && private_file "$STATE/seed" \
 [ -c /dev/ptmx ] && grep -q ' /dev/pts devpts ' /proc/mounts \
 	|| fail "PTY devices are not ready"
 
+status starting "waiting for USB" || fail "could not publish panel status"
 start=$(uptime_s) || fail "no uptime clock for USB readiness"
 deadline=$((start + 10))
 polls=0
@@ -51,11 +63,13 @@ done
 ip -4 addr show dev usb0 | grep -q 'inet 192\.168\.15\.244/24 ' \
 	|| fail "USB address is not ready"
 
+status starting "initializing entropy" || fail "could not publish panel status"
 say "initializing entropy before SSH/key generation"
 /bin/ssh-seed >>"$LOG" 2>&1 || fail "entropy initialization failed"
 [ -f /var/run/dash-ssh-seeded ] || fail "entropy readiness was not recorded"
 [ ! -L "$HOSTKEY" ] || fail "host key permissions are unsafe"
 if [ ! -e "$HOSTKEY" ]; then
+	status starting "generating host key" || fail "could not publish panel status"
 	say "generating device-specific Ed25519 host key"
 	keydir=$(mktemp -d "$STATE/hostkey.XXXXXX") || fail "creating private key workspace failed"
 	if ! /bin/dropbearkey -t ed25519 -f "$keydir/key" >>"$LOG" 2>&1; then
@@ -75,12 +89,14 @@ public=$(/bin/dropbearkey -y -f "$HOSTKEY" 2>>"$LOG") \
 printf '%s\n' "$public" | grep -q '^ssh-ed25519 ' \
 	|| fail "host key is not Ed25519"
 printf '%s\n' "$public" >>"$LOG"
-say "listening on USB 192.168.15.244:22; keys only, forwarding disabled"
+status starting "binding SSH socket" || fail "could not publish panel status"
+say "starting SSH on USB 192.168.15.244:22"
 # Forward runit's stop signal to the foreground server. A server failure parks
 # instead of becoming an automatic rapid restart loop; USB remains untouched.
 pid=
 stop() {
 	trap - TERM INT HUP
+	status stopped "service stopped" || say "could not publish panel status"
 	if [ -n "$pid" ]; then
 		kill -TERM "$pid" 2>/dev/null
 		wait "$pid" 2>/dev/null
@@ -92,6 +108,19 @@ trap stop TERM INT HUP
 /sbin/dropbear -F -s -j -k -p 192.168.15.244:22 \
 	-r "$HOSTKEY" -D /etc/dropbear >>"$LOG" 2>&1 &
 pid=$!
+if ! /bin/dash-status listening "$pid" >>"$LOG" 2>&1; then
+	kill -TERM "$pid" 2>/dev/null
+	wait "$pid" 2>/dev/null
+	trap - TERM INT HUP
+	fail "SSH did not bind the USB address"
+fi
+status ready "key authentication only" || {
+	kill -TERM "$pid" 2>/dev/null
+	wait "$pid" 2>/dev/null
+	trap - TERM INT HUP
+	fail "could not publish panel status"
+}
+say "listening on USB 192.168.15.244:22; keys only, forwarding disabled"
 wait "$pid"
 rc=$?
 trap - TERM INT HUP

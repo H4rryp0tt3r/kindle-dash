@@ -61,12 +61,13 @@ dropbearkey)
 	echo 'ssh-ed25519 AAAA mock-public-key'
 	echo 'Fingerprint: SHA256:mock-public-fingerprint'
 	;;
+dash-status) [ "$SCENARIO" != listen-failure ] ;;
 dropbear) exit 42 ;;
 *) exit 1 ;;
 esac
 MOCK
 chmod +x "$MOCK/command"
-for name in uname tail dmesg stat insmod ip ssh-seed dropbearkey dropbear; do
+for name in uname tail dmesg stat insmod ip ssh-seed dropbearkey dropbear dash-status; do
 	ln -s command "$MOCK/$name"
 done
 
@@ -93,6 +94,7 @@ render() {
 	source=$(<"$HERE/overlay/service/$1/run")
 	source=${source/'PATH=/bin:/sbin'/"PATH=$MOCK:$PATH"}
 	source=${source//\/bin\/ssh-seed/$MOCK/ssh-seed}
+	source=${source//\/bin\/dash-status/$MOCK/dash-status}
 	source=${source//\/bin\/dropbearkey/$MOCK/dropbearkey}
 	source=${source//\/sbin\/dropbear/$MOCK/dropbear}
 	source=${source//\/lib\/modules\//$ROOT/lib/modules/}
@@ -129,18 +131,20 @@ for SCENARIO in success missing-module module-failure missing-usb address-failur
 	run_service 20-usbnet
 	if [ "$SCENARIO" = success ]; then
 		[ -f "$ROOT/var/run/dash-usbnet-ready" ]
+		[ "$(head -1 "$ROOT/var/run/dash-usbnet.status")" = ready ]
 		assert_log 'ready; Mac USB Ethernet'
 		grep -q '^insmod .*g_ether.ko host_addr=02:00:00:00:00:01 dev_addr=02:00:00:00:00:02$' "$ROOT/calls"
 		[ "$(<"$ROOT/proc/asession")" = 0 ]
 	else
 		[ ! -e "$ROOT/var/run/dash-usbnet-ready" ]
 		[ -s "$ROOT/var/run/dash-usbnet-failed" ]
+		[ "$(head -1 "$ROOT/var/run/dash-usbnet.status")" = failed ]
 		assert_log 'unavailable:'
 	fi
 	count=$((count + 1))
 done
 
-for SCENARIO in success missing-auth unsafe-auth unsafe-dir symlink-auth symlink-state symlink-hostkey dangling-hostkey missing-seed short-seed unsafe-seed no-pty missing-usb usb-failed wrong-ip entropy-failure missing-seeded-marker key-failure invalid-key unsafe-hostkey; do
+for SCENARIO in success missing-auth unsafe-auth unsafe-dir symlink-auth symlink-state symlink-hostkey dangling-hostkey missing-seed short-seed unsafe-seed no-pty missing-usb usb-failed wrong-ip entropy-failure missing-seeded-marker key-failure invalid-key unsafe-hostkey listen-failure; do
 	fixture
 	: >"$ROOT/var/run/dash-usbnet-ready"
 	echo 192.168.15.244/24 >"$ROOT/address"
@@ -187,8 +191,14 @@ for SCENARIO in success missing-auth unsafe-auth unsafe-dir symlink-auth symlink
 		! grep -q '^dropbearkey -t' "$ROOT/calls"
 		! grep -q '^insmod ' "$ROOT/calls"
 	else
-		assert_log 'unavailable:'
-		assert_closed
+		if [ "$SCENARIO" = missing-auth ]; then
+			assert_log 'disabled: not provisioned'
+			[ "$(head -1 "$ROOT/var/run/dash-sshd.status")" = disabled ]
+		else
+			assert_log 'unavailable:'
+			[ "$(head -1 "$ROOT/var/run/dash-sshd.status")" = failed ]
+		fi
+		[ "$SCENARIO" = listen-failure ] || assert_closed
 	fi
 	count=$((count + 1))
 done

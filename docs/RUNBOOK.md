@@ -24,7 +24,7 @@ built from, never a literal written by hand.
 | stage 1 | `/etc/runit/1` — mounts, panel power policy, then exits |
 | stage 2 | `/etc/runit/2` — busybox `runsvdir /service`, must not return |
 | stage 3 | `/etc/runit/3` — sync + unmount |
-| service | `10-dash` — paints the panel once, then parks |
+| service | `10-dash` — streams current-boot logs and USB/SSH status |
 | renderer | `bin/screen` — 8x8 font, scale 2, one conservative GC16 update |
 | USB network | `20-usbnet` — stock gadget stack, static USB address |
 | maintenance SSH | `30-sshd` — key-only Dropbear; disabled until provisioned |
@@ -38,7 +38,9 @@ and writes nothing outside the filesystem.
 
 `10-dash` paints the whole frame in exactly one GC16 update — a full pass over a
 1024x758 panel is slow and visibly flashes, so the rule is **one e-ink update per
-frame**; it does not loop.
+frame**. Paint-once-per-boot is no longer required: the streaming coordinator
+refreshes when output/status changes, coalesces lines arriving during a refresh,
+and blocks while idle. No other service touches the framebuffer.
 
 ## Build
 

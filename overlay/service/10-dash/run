@@ -1,58 +1,11 @@
 #!/bin/busybox sh
-# Dash OS -- /service/10-dash/run
-#
-# The 0.1.0 deliverable: the init system runs and "Hello World!" is on the panel.
-#
-# This service is the ONLY thing in the system that touches /dev/fb0. Each panel
-# frame costs one full e-ink update (slow, and it flashes), so it paints exactly
-# once and then parks -- it does not loop and repaint.
-#
-# Every step is appended to /var/log/dash.log. That file lives on the rootfs, so
-# while the device is in diags macOS mounts p1 read-only at /Volumes/dash-root
-# and the log can simply be opened in the Finder. That is the whole readback
-# mechanism: no custom protocol, no raw sectors, nothing that can corrupt a
-# kernel.
-#
-# IMPORTANT: the log file must never move to a raw-LBA scheme. An earlier design
-# wrote progress markers to absolute sectors below p1, and those LBAs overlapped
-# the main kernel image and silently corrupted it.
-
+# Dash OS -- the only panel owner. Stream current-boot logs and setup status.
+# The coordinator blocks while idle, coalesces output during a refresh, and uses
+# one conservative GC16 update per frame. USB/SSH never touch the framebuffer.
+PATH=/bin:/sbin
+export PATH
 LOG=/var/log/dash.log
-FRAME=/var/run/dash.frame
-RELEASE=/etc/dash-release
-
-say() {
-	echo "$(cut -d. -f1 /proc/uptime 2>/dev/null)s  10-dash: $*" >>"$LOG"
-}
-
-say "start"
-
-# The version comes from /etc/dash-release, which the build GENERATES from the
-# VERSION file at the repo root. It is not written here: a version literal in
-# this script is a second copy to forget, and this is the one the panel shows.
-REL=$(cat "$RELEASE" 2>/dev/null)
-[ -n "$REL" ] || REL="unknown"
-say "release $REL"
-
-{
-	echo
-	echo "  Hello World!"
-	echo
-	echo "  Dash OS $REL"
-	echo "  uptime  $(cut -d. -f1 /proc/uptime 2>/dev/null)s"
-	echo "  $(cut -d' ' -f3 /proc/version 2>/dev/null)"
-} >"$FRAME" 2>>"$LOG"
-
-say "frame written, $(wc -c <"$FRAME" 2>/dev/null) bytes"
-
-# One panel update. `screen` keeps its own output (and any error) in the log.
-if [ -e /dev/fb0 ]; then
-	/bin/screen "$FRAME" >>"$LOG" 2>&1
-	say "paint returned rc=$?"
-else
-	say "no /dev/fb0 present, panel not painted"
-fi
-
-# Park here so runsv sees a healthy supervised service rather than a
-# crash-looping one.
-exec tail -f /dev/null 2>/dev/null
+printf '%ss  10-dash: starting streaming panel\n' "$(cut -d. -f1 /proc/uptime)" >>"$LOG"
+# Exec keeps runit's stop/restart directed at the coordinator, not a shell that
+# could leave an orphan renderer competing with the next service instance.
+exec /bin/dash-status >>"$LOG" 2>&1

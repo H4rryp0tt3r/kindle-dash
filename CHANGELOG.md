@@ -70,6 +70,10 @@ immutable, so a tag per release is an alias with nothing to add.
 
 ### Added
 
+- Streaming panel feedback for current-boot logs and USB/SSH startup/failures.
+  Paint-once-per-boot is removed: one panel owner refreshes changed frames,
+  coalesces output during a refresh and blocks when idle. Pending setup shows a
+  watchdog timeout; SSH is reported listening only after verifying its socket.
 - USB Ethernet maintenance access using the pinned stock ARC gadget modules and
   a separate runit service, without WiFi, serial, mass-storage export, or changes
   to the panel service. Hardware enumeration still requires device validation.
