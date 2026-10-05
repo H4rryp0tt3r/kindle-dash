@@ -168,19 +168,39 @@ jobs:
         env:
           VERSION: ${{ steps.ver.outputs.version }}
           PINS_SHA: ${{ steps.pins.outputs.sha }}
-          TOKEN: ${{ secrets.DASH_PINS_TOKEN }}
+          # READ token -- only good for `make pins`. This step needs write.
+          READ_TOKEN: ${{ secrets.DASH_PINS_TOKEN }}
+          WRITE_TOKEN: ${{ secrets.DASH_PINS_WRITE_TOKEN }}
+          PINS_REPO: H4rryp0tt3r/kindle-dash-pins
         run: |
           set -euo pipefail
+          [ -n "${WRITE_TOKEN:-}" ] || {
+            echo "::error::DASH_PINS_WRITE_TOKEN is not set; a release is two SHAs and the pins repo would stay untagged."
+            exit 1
+          }
+
           cd .pins
+          # Already there? Say so, and say why. Do not fold "could not push" into
+          # "already exists": a release that is tagged in one repo and not the
+          # other is exactly the state this file is supposed to make impossible,
+          # and the previous `|| echo` reported it as success.
+          if git ls-remote --exit-code --tags origin "refs/tags/$VERSION" >/dev/null 2>&1; then
+            echo "::notice::$PINS_REPO already has tag $VERSION; leaving it alone"
+            exit 0
+          fi
+
           git -c user.name=github-actions[bot] \
               -c user.email=41898282+github-actions[bot]@users.noreply.github.com \
               tag -a "$VERSION" -m "Dash OS $VERSION pinned inputs" "$PINS_SHA"
           # Clear the checkout header here too: it is configured globally for
           # every github.com URL, so it also hijacks this push into the pins repo.
+          # Without it the push silently runs as github-actions[bot].
           git -c "http.https://github.com/.extraheader=" \
-            push "https://x-access-token:$TOKEN@github.com/H4rryp0tt3r/kindle-dash-pins.git" \
+            push "https://x-access-token:$WRITE_TOKEN@github.com/$PINS_REPO.git" \
             "refs/tags/$VERSION" \
-            || echo "::notice::pins tag $VERSION already exists; leaving it alone"
+            || { echo "::error::could not tag $PINS_REPO at $VERSION -- the release is only half done"; exit 1; }
+
+          echo "tagged $PINS_REPO at $VERSION"
 
       - name: tag this repo, with the fingerprint in the annotation
         if: steps.kind.outputs.kind == 'release'

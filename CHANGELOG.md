@@ -29,7 +29,10 @@ fingerprint.
   miss as "already exists" — leaving a release tagged in one repo only, with an
   annotation naming a pins SHA no tag pointed at. It now requires
   `DASH_PINS_WRITE_TOKEN`, distinguishes "already tagged" from "could not push",
-  and fails the release rather than announcing it.
+  and fails the release rather than announcing it. **A release now also needs a
+  `DASH_PINS_WRITE_TOKEN` secret** — contents: write on `kindle-dash-pins` only.
+  One token cannot be both jobs: the token that clones the pins must not be the
+  same one that can rewrite them, so the read token stays read-only.
 - `gh` was called without `GH_TOKEN` in both release workflows; it exits 4 with a
   help message, so the step died without saying what it was reading.
 - `!approve` and every `!release-*` were refused for the repository owner, because
