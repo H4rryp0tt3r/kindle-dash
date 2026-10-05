@@ -164,7 +164,25 @@ jobs:
           message=$(printf 'Release-Intent: %s\nPlanned-Version: %s\nApproved-By: @%s' \
             "$INTENT" "$VERSION" "$AUTHOR")
 
-          gh api --method PUT "repos/$REPO/pulls/$PR/merge" \
+          # The merge is done with a PAT, NOT github.token.
+          #
+          # GitHub does not trigger workflows from events created by GITHUB_TOKEN,
+          # to stop a token from being able to drive itself in a loop. That makes
+          # github.token useless here: the squash-merge below pushes the release
+          # commit, and release-finalize.yml is triggered by exactly that push.
+          # With github.token the release commit lands, the finaliser never runs,
+          # and the release silently stops half-finished -- merged, untagged, with
+          # VERSION still at the old number and no way to retry.
+          #
+          # DASH_RELEASE_TOKEN is a fine-grained PAT: contents rw on this repo, so
+          # its pushes are ordinary user pushes and do trigger workflows.
+          MERGE_TOKEN="${{ secrets.DASH_RELEASE_TOKEN }}"
+          if [ -z "$MERGE_TOKEN" ]; then
+            echo "::error::DASH_RELEASE_TOKEN is not set; merging with github.token would merge without finalising."
+            exit 1
+          fi
+
+          GH_TOKEN="$MERGE_TOKEN" gh api --method PUT "repos/$REPO/pulls/$PR/merge" \
             -f merge_method=squash \
             -f commit_title="Dash OS $VERSION: $title" \
             -f commit_message="$message" >/dev/null \
