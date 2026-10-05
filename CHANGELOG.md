@@ -4,9 +4,10 @@ All notable changes to Dash OS. Format follows [Keep a Changelog]; versions
 follow [SemVer]. `VERSION` is the single source of truth for the current
 number, and this file is the record of what each version contains.
 
-A release is two SHAs: this repo at tag `X`, and `kindle-dash-pins` at tag `X`.
-Both are recorded in the tag annotation, along with the rootfs content
-fingerprint.
+A release is two SHAs: this repo at tag `X`, and the pinned-inputs commit named in
+`PINS.lock`. Both are recorded in the tag annotation, along with the rootfs
+content fingerprint. The pins repo carries no tags — a commit SHA is already
+immutable, so a tag per release is an alias with nothing to add.
 
 ## [Unreleased]
 
@@ -29,10 +30,8 @@ fingerprint.
   miss as "already exists" — leaving a release tagged in one repo only, with an
   annotation naming a pins SHA no tag pointed at. It now requires
   `DASH_PINS_WRITE_TOKEN`, distinguishes "already tagged" from "could not push",
-  and fails the release rather than announcing it. **A release now also needs a
-  `DASH_PINS_WRITE_TOKEN` secret** — contents: write on `kindle-dash-pins` only.
-  One token cannot be both jobs: the token that clones the pins must not be the
-  same one that can rewrite them, so the read token stays read-only.
+  and fails the release rather than announcing it. Superseded below: the pins repo
+  is no longer tagged at all, so no write token is needed.
 - `gh` was called without `GH_TOKEN` in both release workflows; it exits 4 with a
   help message, so the step died without saying what it was reading.
 - `!approve` and every `!release-*` were refused for the repository owner, because
@@ -42,6 +41,32 @@ fingerprint.
   left `main` red: after a bump, `Unreleased` holds the placeholder on purpose, and
   the gate rejected the release it had just produced. The rule is now PR-scoped;
   `build` and `test` still run on `main`.
+
+### Changed
+
+- The pinned binary inputs are tracked by **`PINS.lock`**, a single `sha =` line in
+  this repo, instead of by tagging the pins repo once per release. A commit SHA is
+  already immutable and content-addressed, so the tag was an alias with nothing to
+  add — and one that had to be written on every release or the release was
+  one-sided. It never was: 0.2.0 shipped tagged here with no matching pins tag,
+  `make pins` failed with `Remote branch 0.2.0 not found`, and the annotation
+  claimed a `pins-sha` no tag pointed at.
+
+  The pins repo now carries **no tags at all**. What makes its commits stable is
+  protecting that repo's default branch (no force push, no delete) plus the
+  SHA256SUMS `make verify` already checks. Changing pins means editing one line in
+  a PR, and `git log PINS.lock` is then the history of when the inputs changed —
+  which is more traceable than a row of tags, and readable without leaving this
+  repo.
+
+  This also removes the need for a `DASH_PINS_WRITE_TOKEN`: the read-only token
+  clones the pins, and nothing writes to them.
+
+  `make pins` fetches the SHA directly (`init` + `fetch --depth 1` +
+  `checkout FETCH_HEAD`; `clone --branch` takes a ref, not a SHA), the release no
+  longer overrides `PINS_REF=main` — which meant a release recorded whatever the
+  branch happened to hold and called it pinned — and the finaliser cross-checks
+  the fetched commit against `PINS.lock` before building.
 
 ### Added
 

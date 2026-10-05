@@ -1,0 +1,17 @@
+# The exact pins commit that every build of this tree uses.
+#
+# A commit SHA is already immutable and content-addressed, so the pins repo needs
+# no tags. This file IS the reference, and it lives in the repo being released, so
+# `git log PINS.lock` is the history of when the binary inputs changed.
+#
+# What makes the SHA below stable is the pins repo's default branch being
+# protected: no force push, no delete. That is the immutability guarantee a tag
+# would otherwise have provided, without a tag per release to fall out of sync.
+#
+# The pinned bytes are Amazon firmware extracted from a device. They stay in a
+# private repo so publishing this project does not redistribute them; their
+# integrity is checked by the SHA256SUMS in each pinned directory (`make verify`).
+#
+# To change the inputs: edit the one line below, in a PR, and say why. Never
+# rewrite this file's history.
+sha = d237b3cfddc62be50f3ae71b671ddc369f325a03

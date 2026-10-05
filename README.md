@@ -30,8 +30,9 @@ not committed — the pinned inputs plus `overlay/` and `src/` are the version.
 waveform and the stock U-Boot are Amazon firmware extracted from a device, so
 they are not redistributable. They live in the private **`kindle-dash-pins`**
 repo; `make pins` clones it at the matching tag and drops the files where
-`build.sh` expects them. A release is therefore **two SHAs** — this repo and the
-pins repo, both at the same tag.
+`build.sh` expects them. A release is therefore **two SHAs** — this repo's tag, and
+the exact pins commit named in `PINS.lock`. The pins repo has no tags: a commit
+SHA is already immutable, so it needs no alias per release to fall out of sync.
 
 ## Releasing
 
@@ -49,7 +50,7 @@ Nothing reaches `main` by being pushed to it. Branch `feature/…`, `fix/…` or
 A release command refuses unless `!approve` is recorded and the `changelog`,
 `test` and `build` checks all passed on the head commit. It then squash-merges;
 the push to `main` bumps `VERSION`, moves the *Unreleased* entry under the new
-version heading, rebuilds, and tags both repos — with the rootfs content
+version heading, rebuilds, and tags this repo — with the rootfs content
 fingerprint in the tag annotation. Tags are immutable; a bad release is fixed by
 a new patch version.
 
