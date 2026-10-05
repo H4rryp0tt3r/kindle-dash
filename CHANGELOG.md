@@ -10,7 +10,41 @@ fingerprint.
 
 ## [Unreleased]
 
-<!-- CHANGELOG-PLACEHOLDER -->
+### Fixed
+
+- Every release merged, reported itself released, and then stopped half way.
+  `commands.yml` squash-merged the PR with the workflow's own `github.token`, and
+  GitHub does not trigger workflow runs from events created by `GITHUB_TOKEN` —
+  the rule that stops a token driving itself in a loop. `release-finalize.yml` is
+  triggered by exactly that push, so it never ran: no `VERSION` bump, no tags, and
+  no error. `!release-minor` printed "squash-merged PR #5 as 0.2.0" and went green.
+  The merge now uses `DASH_RELEASE_TOKEN`, whose pushes are ordinary user pushes,
+  and refuses to fall back to the workflow token rather than fail quietly again.
+- The release token was ignored when pushing. `actions/checkout` persists an
+  `http.https://github.com/.extraheader` holding the bot's credentials, and a
+  configured header outranks the token in a URL, so the bump, the pins tag and
+  this repo's tag all ran as `github-actions[bot]` and were refused with a 403.
+- The pins tag was pushed with `DASH_PINS_TOKEN`, which is read-only on purpose so
+  `make pins` can clone. It could never write a tag, and a `|| echo` reported the
+  miss as "already exists" — leaving a release tagged in one repo only, with an
+  annotation naming a pins SHA no tag pointed at. It now requires
+  `DASH_PINS_WRITE_TOKEN`, distinguishes "already tagged" from "could not push",
+  and fails the release rather than announcing it.
+- `gh` was called without `GH_TOKEN` in both release workflows; it exits 4 with a
+  help message, so the step died without saying what it was reading.
+- `!approve` and every `!release-*` were refused for the repository owner, because
+  the permission check used an endpoint the workflow token cannot read and
+  `2>/dev/null || echo none` turned that failure into a verdict.
+- The `changelog` check ran on pushes to `main` as well as PRs, so each release
+  left `main` red: after a bump, `Unreleased` holds the placeholder on purpose, and
+  the gate rejected the release it had just produced. The rule is now PR-scoped;
+  `build` and `test` still run on `main`.
+
+### Added
+
+- `release-finalize.yml` accepts `workflow_dispatch` with a version, to finish a
+  release whose commit is already on `main`. The bump kind is derived from the jump
+  rather than typed in, so an operator cannot ask for a patch and get a major.
 
 ## [0.2.0] — 2026-10-05
 

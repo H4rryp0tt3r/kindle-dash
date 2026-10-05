@@ -27,6 +27,19 @@ concurrency:
 jobs:
   changelog:
     name: changelog
+    # Pull requests only. This is a rule about what a PR must contain; after a
+    # release, `Unreleased` holding the bare placeholder is the CORRECT state on
+    # main, and so it is on the release bump commit.
+    #
+    # Running it on push to main meant every release ended by turning main red:
+    #
+    #   ##[error]CHANGELOG.md's Unreleased section still contains the placeholder.
+    #   ##[error]Process completed with exit code 1.
+    #
+    # which is the gate refusing the release it had just produced. The build and
+    # test jobs still run on main -- they are worth knowing about there -- it is
+    # only this rule that is PR-scoped.
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
