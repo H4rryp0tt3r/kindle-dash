@@ -57,10 +57,21 @@ jobs:
           TAG=$( (sha256sum Containerfile || shasum -a 256 Containerfile) | cut -c1-12 )
           if [ -f /tmp/dash-build-image.tar ]; then
             podman load -i /tmp/dash-build-image.tar
-            podman tag "localhost/dash-build:$TAG" "localhost/dash-build:$TAG" 2>/dev/null || true
           fi
           make env
-          podman save "localhost/dash-build:$TAG" -o /tmp/dash-build-image.tar
+      - name: cache the image for the next run
+        # Two things this step must survive, both learned the hard way:
+        #  * Every step is a FRESH shell, so $TAG from the previous step is gone.
+        #    Recompute it rather than relying on a value that is not there.
+        #  * actions/cache RESTORES /tmp/dash-build-image.tar before this runs, and
+        #    CI's podman refuses to overwrite an existing docker-archive
+        #    ("docker-archive doesn't support modifying existing images"). Save to
+        #    a scratch path and move it into place.
+        run: |
+          set -euo pipefail
+          TAG=$( (sha256sum Containerfile || shasum -a 256 Containerfile) | cut -c1-12 )
+          podman save "localhost/dash-build:$TAG" -o /tmp/dash-build-image.tar.new
+          mv -f /tmp/dash-build-image.tar.new /tmp/dash-build-image.tar
       - run: make test
 
   build:
@@ -94,9 +105,17 @@ jobs:
           fi
           make pins
       - name: build the rootfs and fingerprint it
+        env:
+          DASH_PINS_TOKEN: ${{ secrets.DASH_PINS_TOKEN }}
         run: |
           make build
           make fingerprint | tee /tmp/fingerprint.txt
+      - name: cache the image for the next run
+        run: |
+          set -euo pipefail
+          TAG=$( (sha256sum Containerfile || shasum -a 256 Containerfile) | cut -c1-12 )
+          podman save "localhost/dash-build:$TAG" -o /tmp/dash-build-image.tar.new
+          mv -f /tmp/dash-build-image.tar.new /tmp/dash-build-image.tar
       - name: upload the fingerprint
         uses: actions/upload-artifact@v4
         with:

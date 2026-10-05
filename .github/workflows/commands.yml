@@ -84,7 +84,7 @@ jobs:
           echo "merged=$merged" >> "$GITHUB_OUTPUT"
           echo "head $sha (state=$state merged=$merged)"
 
-      - name: !approve -- record approval
+      - name: "approve: record approval for the head commit"
         if: steps.cmd.outputs.cmd == 'approve'
         env:
           SHA: ${{ steps.head.outputs.sha }}
@@ -99,7 +99,7 @@ jobs:
             -f description="approved by @$AUTHOR via !approve" >/dev/null
           echo "approved recorded on $SHA"
 
-      - name: release -- verify every precondition
+      - name: "release: verify every precondition"
         id: gate
         if: steps.cmd.outputs.cmd == 'release'
         env:
@@ -135,7 +135,7 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "all preconditions met: $INTENT release -> $version"
 
-      - name: release -- satisfy the ruleset, then squash-merge
+      - name: "release: satisfy the ruleset, then squash-merge"
         if: steps.cmd.outputs.cmd == 'release' && steps.gate.outputs.version != ''
         env:
           SHA: ${{ steps.head.outputs.sha }}
@@ -172,7 +172,7 @@ jobs:
 
           echo "squash-merged PR #$PR as $VERSION ($INTENT)"
 
-      - name: release -- tell the PR what happened
+      - name: "release: report the outcome on the PR"
         if: always() && steps.cmd.outputs.cmd == 'release'
         env:
           PR: ${{ github.event.issue.number }}

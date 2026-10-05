@@ -256,6 +256,13 @@ Build notes learned the hard way:
   the step into a YAML syntax error. Use `printf` with explicit `\n`.
 - **Validate workflow YAML before pushing it.** `ruby -ryaml` locally, and
   `bash -n` on every extracted `run:` block.
+- **A YAML scalar may not begin with `!`.** `!` is the *tag indicator*, so
+  `- name: !approve -- record approval` is not a string starting with `!approve`:
+  it is a tagged node, and the token is silently dropped (Ruby reads the name as
+  `"-- record approval"`). GitHub then rejects the whole workflow at schema
+  validation, and the only symptom is a run with **0 jobs that fails instantly
+  and logs nothing**. Quote such names. This killed the entire release flow once;
+  `ruby -ryaml` alone did not catch it, because Ruby parses it happily.
 
 ## SSH plan (0.4.0)
 

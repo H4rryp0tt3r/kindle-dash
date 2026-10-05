@@ -10,7 +10,36 @@ fingerprint.
 
 ## [Unreleased]
 
-<!-- CHANGELOG-PLACEHOLDER -->
+### Fixed
+
+- `make test` failed from a clean checkout: `cmd_test` wrote `build/test.log`
+  without creating `build/` first, so `tee` errored and `pipefail` turned a
+  passing run into a failure. It passed locally only because `build/` always
+  existed from an earlier build.
+- `commands.yml` never ran at all. A step named `- name: !approve -- record
+  approval` is not a string beginning with `!approve`: `!` is the YAML tag
+  indicator, so the name was a tagged node, GitHub rejected the workflow at
+  schema validation, and every run failed in 0s with no jobs and no log. That
+  silently disabled `!approve` and all three `!release-*` commands.
+- The build-environment lock asserted an invariant that could not hold. It
+  compared podman's config digest, which embeds a build timestamp, so the same
+  `Containerfile` built on two machines — or the same image restored from the CI
+  cache — never matched, and `make env` failed on a perfectly good image. It now
+  compares a toolchain fingerprint (`rustc`, cross-gcc, `mke2fs`) computed from
+  inside the image, which is content rather than provenance.
+- Two CI wiring bugs, both found by CI: `DASH_PINS_TOKEN` was scoped to the step
+  that fetched the pins, not the step that ran `make build` (which depends on
+  them), and the image was re-saved after `make env` had already restored it,
+  which podman rejects — `docker-archive doesn't support modifying existing
+  images`.
+- The image cache never worked. `actions/cache` restores
+  `/tmp/dash-build-image.tar` before the job runs, and CI's podman refuses to
+  overwrite an existing docker-archive (`docker-archive doesn't support modifying
+  existing images`). The save now goes to a scratch path and is moved into place.
+  Separately, the save step read `$TAG` from the *previous* step; every Actions
+  step is a fresh shell, so it was unset and podman got
+  `localhost/dash-build:` — `invalid reference format`. Both jobs now save, so a
+  failing `test` no longer forces `build` to rebuild the image from scratch.
 
 ## [0.1.0] — 2026-10-05
 

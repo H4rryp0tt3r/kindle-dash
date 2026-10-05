@@ -118,11 +118,11 @@ $(foreach f,$(RAW_INPUTS),$(eval $(call UNPACK,$(f))))
 #     podman rmi $(BUILD_IMAGE) && make env    (drop the stale local copy)
 env:
 	@if podman image exists $(BUILD_IMAGE) >/dev/null 2>&1; then \
-		cur=$$(podman image inspect --format '{{.Id}}' $(BUILD_IMAGE)); \
-		want=$$(sed -n 's/^id: //p' $(LOCK) 2>/dev/null); \
+		cur=$$($(HERE)/build.sh toolchain-fp $(BUILD_IMAGE)); \
+		want=$$(sed -n 's/^toolchain: //p' $(LOCK) 2>/dev/null); \
 		if [ -n "$$want" ] && [ "$$cur" != "$$want" ]; then \
 			if [ -n "$${ALLOW_IMAGE_DRIFT:-}" ]; then \
-				echo "WARNING: $(BUILD_IMAGE) is not the pinned image, continuing anyway"; \
+				echo "WARNING: $(BUILD_IMAGE) is not the pinned toolchain, continuing anyway"; \
 				echo "         local: $$cur"; \
 				echo "         lock:  $$want"; \
 			else \
@@ -133,7 +133,7 @@ env:
 				echo "  The build environment is pinned, so a version is only reproducible" >&2; \
 				echo "  against one toolchain. Fix it either way:" >&2; \
 				echo >&2; \
-				echo "    make env-bump    rebuild, republish and re-pin the digest (needs ghcr login)" >&2; \
+				echo "    make env-bump    rebuild, republish and re-pin (needs ghcr login)" >&2; \
 				echo "    podman rmi $(BUILD_IMAGE) && make env    drop the stale local image" >&2; \
 				echo "    ALLOW_IMAGE_DRIFT=1 make build       proceed anyway, knowing it is unpinned" >&2; \
 				exit 1; \

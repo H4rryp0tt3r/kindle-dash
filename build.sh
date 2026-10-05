@@ -9,6 +9,7 @@
 #   build.sh check-float <dir>...       refuse VFPv4-only binaries       (in the image)
 #   build.sh fingerprint <img> [img2]   content fingerprint of a rootfs  (in the image)
 #   build.sh lock-env  <image>          write BUILD-IMAGE.lock
+#   build.sh toolchain-fp <image>       rustc/gcc/mke2fs fingerprint of an image
 #   build.sh hashes    <dir> <name>...  write <dir>/SHA256SUMS
 #   build.sh verify    <dir>...         check each <dir>/SHA256SUMS
 #
@@ -65,6 +66,7 @@ Dash OS build tool.
   build.sh check-float <dir>...        refuse VFPv4-only binaries (in the image)
   build.sh fingerprint <img> [img2]    content fingerprint (in the image)
   build.sh lock-env  <image>           write BUILD-IMAGE.lock
+  build.sh toolchain-fp <image>        toolchain fingerprint of an image
   build.sh hashes    <dir> <name>...   write <dir>/SHA256SUMS
   build.sh verify    <dir>...          check each <dir>/SHA256SUMS
 EOF
@@ -272,6 +274,7 @@ cmd_test() {
 	local SRC=${1:?usage: build.sh test <srcdir>}
 	SRC=$(cd "$SRC" && pwd)
 	command -v podman >/dev/null || { echo "podman required" >&2; exit 1; }
+	mkdir -p "$HERE/build"
 
 	echo "=== test: $SRC/*.rs ==="
 	COPYFILE_DISABLE=1 tar -C "$SRC" -cf - --no-xattrs . \
@@ -310,12 +313,31 @@ echo "TEST_OK $n module(s)" >&2
 # against `id` and refuses to continue on a mismatch; `digest` is what makes it
 # pullable by anyone else (a locally built image has no manifest digest until
 # it is pushed, so that line may be absent).
+# The toolchain fingerprint: what the image actually provides, as opposed to what
+# the image file happens to hash to.
+#
+# NOT the config digest (`podman image inspect .Id`): that embeds the build
+# timestamp, so the same Containerfile built on two machines -- or the same image
+# restored from a CI cache -- yields a different id. Asserting on it fails for a
+# perfectly good image, which is worse than not asserting at all.
+#
+# These three are the inputs that actually change output bytes: the compiler, the
+# cross linker, and the tool that writes the filesystem. If Ubuntu moves any of
+# them, this string changes and `make env` says so.
+cmd_toolchain_fp() {
+	local IMG=${1:?usage: build.sh toolchain-fp <image>}
+	podman run --rm --pull never "$IMG" bash -c '
+		rustc --version
+		arm-linux-gnueabi-gcc -dumpversion
+		mke2fs -V 2>&1 | head -1
+	' 2>/dev/null | sed 's/[[:space:]]*$//' | tr '\n' '|'
+}
+
 cmd_lock_env() {
 	local IMG=${1:?usage: build.sh lock-env <image> [published]}
 	local PUBLISHED=${2:-no}
 	command -v podman >/dev/null || { echo "podman required" >&2; exit 1; }
-	local id digest image tag
-	id=$(podman image inspect --format '{{.Id}}' "$IMG")
+	local digest image tag
 	digest=$(podman image inspect --format '{{.Digest}}' "$IMG" 2>/dev/null || true)
 	tag=${IMG##*:}
 	image=$(sed -n 's/^image: //p' "$HERE/BUILD-IMAGE.lock" 2>/dev/null || true)
@@ -332,7 +354,7 @@ cmd_lock_env() {
 	if [ -n "$digest" ] && [ "$digest" != "<no value>" ]; then
 		printf 'digest: %s\n' "$digest"
 	fi
-	printf 'id: %s\n' "$id"
+	printf 'toolchain: %s\n' "$(cmd_toolchain_fp "$IMG")"
 }
 
 # ============================================================== check-float
@@ -621,6 +643,7 @@ case "${1:-build}" in
 	check-float) shift; cmd_check_float "$@";;
 	fingerprint) shift; cmd_fingerprint "$@";;
 	lock-env)    shift; cmd_lock_env "$@";;
+	toolchain-fp) shift; cmd_toolchain_fp "$@";;
 	hashes)      shift; cmd_hashes "$@";;
 	verify)      shift; cmd_verify "$@";;
 	-h|--help|help) usage;;

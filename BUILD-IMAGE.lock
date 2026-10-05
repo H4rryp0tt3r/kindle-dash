@@ -2,4 +2,4 @@ image: ghcr.io/h4rryp0tt3r/dash-build
 tag: f44dea91d046
 published: no
 digest: sha256:63b0773ae8ebbc92e232f604f0a8100dcd0460150dc7fe5b6a82f6e6a8d53fc1
-id: ff3d77447321962281962e1f8499adf56a9676c8ff3767ad514b5e6c6d94d816
+toolchain: rustc 1.83.0 (90b35a623 2024-11-26)|13|mke2fs 1.47.0 (5-Feb-2023)|
