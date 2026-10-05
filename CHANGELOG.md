@@ -10,6 +10,10 @@ fingerprint.
 
 ## [Unreleased]
 
+<!-- CHANGELOG-PLACEHOLDER -->
+
+## [0.2.0] — 2026-10-05
+
 ### Fixed
 
 - `make test` failed from a clean checkout: `cmd_test` wrote `build/test.log`
