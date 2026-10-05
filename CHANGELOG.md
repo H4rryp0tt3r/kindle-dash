@@ -11,6 +11,10 @@ immutable, so a tag per release is an alias with nothing to add.
 
 ## [Unreleased]
 
+<!-- CHANGELOG-PLACEHOLDER -->
+
+## [0.2.1] — 2026-10-05
+
 ### Fixed
 
 - Restore PR command authentication lost in `9c7f8b1`: set `GH_TOKEN`, accept
