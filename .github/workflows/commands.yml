@@ -31,6 +31,12 @@ jobs:
     name: command
     if: github.event.issue.pull_request
     runs-on: ubuntu-latest
+    # Job level, not per step: every step below uses `gh`, and `gh` refuses to run
+    # in Actions without GH_TOKEN. It exits 4 with a help message rather than
+    # making a request, so a step that forgets it fails with an error that says
+    # nothing about what was actually being read.
+    env:
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
 
