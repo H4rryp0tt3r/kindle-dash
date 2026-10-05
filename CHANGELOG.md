@@ -13,6 +13,8 @@ immutable, so a tag per release is an alias with nothing to add.
 
 ### Fixed
 
+- Restore PR command authentication lost in `9c7f8b1`: set `GH_TOKEN`, accept
+  the repository owner, and report permission lookup failures instead of hiding them.
 - Every release merged, reported itself released, and then stopped half way.
   `commands.yml` squash-merged the PR with the workflow's own `github.token`, and
   GitHub does not trigger workflow runs from events created by `GITHUB_TOKEN` —
