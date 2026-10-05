@@ -136,7 +136,18 @@ jobs:
               commit -aqm "chore(release): $VERSION [skip-bump]" \
             || { echo "::error::nothing to commit; is the CHANGELOG already released?"; exit 1; }
 
-          git push "https://x-access-token:$TOKEN@github.com/$REPO.git" HEAD:main
+          # The empty -c is load-bearing. actions/checkout persists an
+          # http.https://github.com/.extraheader holding github-actions[bot]'s
+          # credentials, and a configured header wins over any userinfo in the
+          # push URL. So this push authenticated as the bot and was refused:
+          #
+          #   remote: Permission to H4rryp0tt3r/kindle-dash.git denied to github-actions[bot].
+          #   fatal: ... The requested URL returned error: 403
+          #
+          # The token is in the URL, so clearing the header is what lets it be
+          # used. Without the empty value the PAT is silently ignored.
+          git -c "http.https://github.com/.extraheader=" \
+              push "https://x-access-token:$TOKEN@github.com/$REPO.git" HEAD:main
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           echo "bumped to $VERSION at $(git rev-parse HEAD)"
 
@@ -164,7 +175,10 @@ jobs:
           git -c user.name=github-actions[bot] \
               -c user.email=41898282+github-actions[bot]@users.noreply.github.com \
               tag -a "$VERSION" -m "Dash OS $VERSION pinned inputs" "$PINS_SHA"
-          git push "https://x-access-token:$TOKEN@github.com/H4rryp0tt3r/kindle-dash-pins.git" \
+          # Clear the checkout header here too: it is configured globally for
+          # every github.com URL, so it also hijacks this push into the pins repo.
+          git -c "http.https://github.com/.extraheader=" \
+            push "https://x-access-token:$TOKEN@github.com/H4rryp0tt3r/kindle-dash-pins.git" \
             "refs/tags/$VERSION" \
             || echo "::notice::pins tag $VERSION already exists; leaving it alone"
 
@@ -196,7 +210,8 @@ jobs:
           git -c user.name=github-actions[bot] \
               -c user.email=41898282+github-actions[bot]@users.noreply.github.com \
               tag -a "$VERSION" -F /tmp/annot
-          git push "https://x-access-token:$TOKEN@github.com/$REPO.git" "refs/tags/$VERSION"
+          git -c "http.https://github.com/.extraheader=" \
+              push "https://x-access-token:$TOKEN@github.com/$REPO.git" "refs/tags/$VERSION"
           echo "tagged $VERSION"
 
       - name: summarise
@@ -212,7 +227,10 @@ jobs:
             cat /tmp/fingerprint.txt 2>/dev/null | head -20
             echo '```'
           } > /tmp/summary.md
-          gh api "repos/$REPO/releases" --method POST \
+          # github.token is contents:read here, so this can never succeed. The
+          # failure was hidden by the `|| echo` below it.
+          GH_TOKEN="${{ secrets.DASH_RELEASE_TOKEN }}" \
+            gh api "repos/$REPO/releases" --method POST \
             -f tag_name="$VERSION" -f name="Dash OS $VERSION" \
             -F body=@/tmp/summary.md 2>/dev/null \
             || echo "::notice::could not create a GitHub release (tag is what matters)"
