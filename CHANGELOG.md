@@ -11,6 +11,10 @@ immutable, so a tag per release is an alias with nothing to add.
 
 ## [Unreleased]
 
+<!-- CHANGELOG-PLACEHOLDER -->
+
+## [0.3.1] — 2026-10-06
+
 ### Fixed
 
 - Bump/tag pushes get five attempts, with 2/4/8/16-second backoff. No force.
