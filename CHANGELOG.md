@@ -11,6 +11,15 @@ immutable, so a tag per release is an alias with nothing to add.
 
 ## [Unreleased]
 
+### Fixed
+
+- Bump/tag pushes get five attempts, with 2/4/8/16-second backoff. No force.
+- Publish only after build + annotated tag succeed. Verify commit, pins, version
+  and remote refs. Failed jobs report failure; never create a release or tag.
+- GitHub rejected the `0.3.0` bump push with an internal server error; the old
+  summary step published anyway. Tag stays immutable. Recover forward to `0.3.1`.
+  Refuse existing target tags; allow explicit recovery to replace the old plan.
+
 ### Added
 
 - Screen streams boot logs + USB/SSH status, errors, timeouts. Paint-once rule

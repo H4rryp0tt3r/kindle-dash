@@ -95,12 +95,27 @@ jobs:
               --current "$(cat VERSION)" --intent "$intent")
           fi
           planned=$(sed -n 's/^Planned-Version: //p' /tmp/msg | head -1)
-          if [ -n "$planned" ] && [ "$planned" != "$version" ]; then
+          # An explicit recovery target may supersede a failed merge's plan.
+          if [ -z "$target" ] && [ -n "$planned" ] && [ "$planned" != "$version" ]; then
             echo "::error::the merge planned $planned but the arithmetic says $version. Refusing to guess."
             exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "$intent -> $version"
+
+      - name: refuse an existing immutable release tag
+        if: steps.kind.outputs.kind == 'release'
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          if git ls-remote --exit-code origin "refs/tags/$VERSION" > /tmp/existing-tag; then
+            echo "::error::tag $VERSION already exists; recover forward with a new version"
+            exit 1
+          else
+            rc=$?
+            [ "$rc" -eq 2 ] || { echo "::error::could not check remote tags"; exit "$rc"; }
+          fi
 
       - name: fetch the pinned binary inputs
         if: steps.kind.outputs.kind == 'release'
@@ -124,6 +139,7 @@ jobs:
 
       - name: bump VERSION and the CHANGELOG, then push
         if: steps.kind.outputs.kind == 'release'
+        id: bump
         env:
           VERSION: ${{ steps.ver.outputs.version }}
           TOKEN: ${{ secrets.DASH_RELEASE_TOKEN }}
@@ -156,25 +172,43 @@ jobs:
           #
           # The token is in the URL, so clearing the header is what lets it be
           # used. Without the empty value the PAT is silently ignored.
-          git -c "http.https://github.com/.extraheader=" \
-              push "https://x-access-token:$TOKEN@github.com/$REPO.git" HEAD:main
-          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-          echo "bumped to $VERSION at $(git rev-parse HEAD)"
+          # Five total attempts; retry the same commit, never force or rebase.
+          for attempt in 1 2 3 4 5; do
+            echo "bump push attempt $attempt/5"
+            if git -c "http.https://github.com/.extraheader=" \
+                push "https://x-access-token:$TOKEN@github.com/$REPO.git" HEAD:main; then
+              break
+            fi
+            [ "$attempt" -lt 5 ] || { echo "::error::bump push failed after 5 attempts"; exit 1; }
+            sleep "$((1 << attempt))"
+          done
+          sha=$(git rev-parse HEAD)
+          remote=$(git ls-remote --exit-code origin refs/heads/main)
+          [ "${remote%%[[:space:]]*}" = "$sha" ] || { echo "::error::remote main does not match release commit"; exit 1; }
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "bumped to $VERSION at $sha"
 
       - name: build and fingerprint the released tree
         if: steps.kind.outputs.kind == 'release'
         id: art
         env:
           DASH_PINS_TOKEN: ${{ secrets.DASH_PINS_TOKEN }}
+          RELEASE_SHA: ${{ steps.bump.outputs.sha }}
+          VERSION: ${{ steps.ver.outputs.version }}
+          PINS_SHA: ${{ steps.pins.outputs.sha }}
         run: |
           set -euo pipefail
-          git pull --rebase origin main >/dev/null 2>&1 || true
+          [ "$(git rev-parse HEAD)" = "$RELEASE_SHA" ] || { echo "::error::release checkout drifted"; exit 1; }
+          [ "$(cat VERSION)" = "$VERSION" ] || { echo "::error::release version mismatch"; exit 1; }
           make build
+          [ "$(git -C .pins rev-parse HEAD)" = "$PINS_SHA" ] || { echo "::error::build pins drifted"; exit 1; }
+          [ "$(cat build/rootfs/etc/dash-release)" = "$VERSION" ] || { echo "::error::image version mismatch"; exit 1; }
           make fingerprint | tee /tmp/fingerprint.txt
-          echo "VERSION in image: $(grep -c "$(cat VERSION)" build/rootfs/etc/dash-release) match(es)"
+          test -s /tmp/fingerprint.txt
 
       - name: tag this repo, with the fingerprint in the annotation
         if: steps.kind.outputs.kind == 'release'
+        id: tag
         env:
           VERSION: ${{ steps.ver.outputs.version }}
           INTENT: ${{ steps.kind.outputs.intent }}
@@ -201,27 +235,52 @@ jobs:
           git -c user.name=github-actions[bot] \
               -c user.email=41898282+github-actions[bot]@users.noreply.github.com \
               tag -a "$VERSION" -F /tmp/annot
-          git -c "http.https://github.com/.extraheader=" \
-              push "https://x-access-token:$TOKEN@github.com/$REPO.git" "refs/tags/$VERSION"
+          for attempt in 1 2 3 4 5; do
+            echo "tag push attempt $attempt/5"
+            if git -c "http.https://github.com/.extraheader=" \
+                push "https://x-access-token:$TOKEN@github.com/$REPO.git" "refs/tags/$VERSION"; then
+              break
+            fi
+            [ "$attempt" -lt 5 ] || { echo "::error::tag push failed after 5 attempts"; exit 1; }
+            sleep "$((1 << attempt))"
+          done
+          sha=$(git rev-parse "refs/tags/$VERSION")
+          remote=$(git ls-remote --exit-code origin "refs/tags/$VERSION")
+          [ "${remote%%[[:space:]]*}" = "$sha" ] || { echo "::error::remote tag does not match release annotation"; exit 1; }
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "tagged $VERSION"
 
-      - name: summarise
-        if: always() && steps.kind.outputs.kind == 'release'
+      - name: publish only the verified release
+        if: success() && steps.kind.outputs.kind == 'release' && steps.art.outcome == 'success' && steps.tag.outcome == 'success'
         env:
           VERSION: ${{ steps.ver.outputs.version }}
           REPO: ${{ github.repository }}
+          RELEASE_SHA: ${{ steps.bump.outputs.sha }}
+          TAG_SHA: ${{ steps.tag.outputs.sha }}
+          GH_TOKEN: ${{ secrets.DASH_RELEASE_TOKEN }}
         run: |
+          set -euo pipefail
+          # The releases API creates absent tags. Verify ours before publishing.
+          remote=$(git ls-remote --exit-code origin "refs/tags/$VERSION")
+          [ "${remote%%[[:space:]]*}" = "$TAG_SHA" ] || { echo "::error::release tag missing or changed"; exit 1; }
+          [ "$(git cat-file -t "$TAG_SHA")" = tag ] || { echo "::error::release tag is not annotated"; exit 1; }
+          [ "$(git rev-parse "$TAG_SHA^{commit}")" = "$RELEASE_SHA" ] || { echo "::error::tagged commit mismatch"; exit 1; }
+          test -s /tmp/fingerprint.txt
           {
-            echo "### Dash OS $VERSION released"
+            echo "### Dash OS $VERSION"
             echo
             echo '```'
-            cat /tmp/fingerprint.txt 2>/dev/null | head -20
+            head -20 /tmp/fingerprint.txt
             echo '```'
           } > /tmp/summary.md
-          # github.token is contents:read here, so this can never succeed. The
-          # failure was hidden by the `|| echo` below it.
-          GH_TOKEN="${{ secrets.DASH_RELEASE_TOKEN }}" \
-            gh api "repos/$REPO/releases" --method POST \
-            -f tag_name="$VERSION" -f name="Dash OS $VERSION" \
-            -F body=@/tmp/summary.md 2>/dev/null \
-            || echo "::notice::could not create a GitHub release (tag is what matters)"
+          gh release create "$VERSION" --repo "$REPO" --verify-tag \
+            --title "Dash OS $VERSION" --notes-file /tmp/summary.md
+          cat /tmp/summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: report failed finalization without publishing
+        if: failure() && steps.kind.outputs.kind == 'release'
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          printf '### Release %s incomplete\nInspect the failed step. Never move an existing tag.\n' \
+            "${VERSION:-unknown}" >> "$GITHUB_STEP_SUMMARY"
