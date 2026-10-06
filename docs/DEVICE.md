@@ -80,7 +80,7 @@ no eMMC write. If `uboot_diags2fastboot.bin` is missing, regenerate it with
 
 ```
 cd <repo>/recovery
-python3.14 fastboot-setvar-reboot.py main
+uv run fastboot-setvar-reboot.py main
 ```
 
 ### Read back a boot
@@ -94,6 +94,13 @@ python3.14 fastboot-setvar-reboot.py main
   ```
 
 ## 5. Host environment
+
+Install `uv` (`brew install uv` on Mac). Recovery script fetches pinned PyUSB +
+bundled libusb automatically; first run needs network. USB permissions still
+apply (Linux udev/sudo; Windows may need a WinUSB driver). No universal driver fix.
+Safe dependency check: `uv run recovery/fastboot-setvar-reboot.py --help`.
+Private index missing packages? Add `--default-index https://pypi.org/simple`
+after `uv run`. Keep global index settings unchanged.
 
 macOS; `uuu` at `/usr/local/bin/uuu`; device ops need `sudo`. In diags the device
 exports the whole disk and macOS auto-mounts p1 at `/Volumes/dash-root`.
