@@ -91,7 +91,7 @@ fastboot flash diags_kernel artifacts/diag-uImage    # 0xE41000
 reboot to diags to install the rootfs:
 
 ```
-python3.14 recovery/fastboot-setvar-reboot.py diags
+uv run recovery/fastboot-setvar-reboot.py diags
 ```
 
 ### Flash the rootfs
@@ -121,7 +121,7 @@ image 32 MiB into p1.
 ### Boot main and watch
 
 ```
-cd recovery && python3.14 fastboot-setvar-reboot.py main
+cd recovery && uv run fastboot-setvar-reboot.py main
 ```
 
 Expect an EPDC INIT-waveform flash (the kernel, before userspace), then the

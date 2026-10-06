@@ -14,6 +14,6 @@ uuu_version 1.0.1
 #
 # Once the device enumerates as 1949:d0e0, finish the job over fastboot:
 #
-#     python3.14 fastboot-setvar-reboot.py main
+#     uv run fastboot-setvar-reboot.py main
 #
 SDP: boot -f uboot_diags2fastboot.bin

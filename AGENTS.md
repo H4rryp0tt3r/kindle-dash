@@ -171,7 +171,7 @@ Flash the kernels (`diags_kernel` is the diags slot; `diags` is p2):
 ```
 fastboot flash kernel       artifacts/main-uImage    # 0x41000
 fastboot flash diags_kernel artifacts/diag-uImage    # 0xE41000
-python3.14 recovery/fastboot-setvar-reboot.py diags  # not: fastboot setvar
+uv run recovery/fastboot-setvar-reboot.py diags  # not: fastboot setvar
 ```
 
 Install the rootfs (device in diags, whole disk exported as `/dev/rdiskN`):
@@ -185,7 +185,7 @@ md5 -q /tmp/p1.img artifacts/dash-rootfs.img
 ```
 
 **Verify the read-back md5 matches before booting** — `diskutil` cannot tell a
-partial write from a complete one. Then `python3.14
+partial write from a complete one. Then `uv run
 recovery/fastboot-setvar-reboot.py main` to boot.
 
 ## Reading a boot without serial
