@@ -11,6 +11,10 @@ immutable, so a tag per release is an alias with nothing to add.
 
 ## [Unreleased]
 
+<!-- CHANGELOG-PLACEHOLDER -->
+
+## [0.3.2] — 2026-10-06
+
 ### Fixed
 
 - Recovery helper runs via `uv`: pinned PyUSB + bundled libusb, no manual pip or
