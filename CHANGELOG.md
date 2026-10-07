@@ -11,6 +11,10 @@ immutable, so a tag per release is an alias with nothing to add.
 
 ## [Unreleased]
 
+<!-- CHANGELOG-PLACEHOLDER -->
+
+## [0.3.3] — 2026-10-07
+
 ### Fixed
 
 - USB setup no longer writes `/proc/asession=0` before loading the controller.
