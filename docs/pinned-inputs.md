@@ -37,7 +37,8 @@ firmware which is already gzip and committed as-is.
 ## USB maintenance inputs
 
 - `third-party/usbnet/`: verified stock `fsl_otg_arc`, `arcotg_udc`, `g_ether`.
-  Load in that order. Match `3.0.35-lab126`. No force-load or extra host drivers.
+  Load in that order; verify platform binding before continuing. Match
+  `3.0.35-lab126`. No force-load, role pokes or extra host drivers.
 - `third-party/dropbear/`: static Dropbear/dropbearkey 2026.94, musl 1.2.5,
   bundled libtomcrypt/libtommath. Source hashes, external recipe, licenses in pins.
   No C built here. No crates. Glibc candidate required Linux 3.2: rejected.

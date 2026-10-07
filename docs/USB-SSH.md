@@ -60,7 +60,11 @@ New output → refresh. Busy refresh → combine lines. Idle → no refresh.
 - `SSH: listening`: Dropbear owns USB port 22.
 - `disabled`: not provisioned. Run provisioning command.
 - `FAILED`: reason shown. Full details in log.
-- `TIMED OUT`: pending after ~20 seconds. Last stage shown. Recovery still watched.
+- USB setup: one attempt per boot, 15-second deadline. Failure/signal/timeout
+  stops retries. Last stage + bounded kernel output in log. No reboot-loop flashes.
+- `TIMED OUT`: panel fallback after ~20 seconds for a missing/hung service.
+- After USB stop/restart, reboot to retry. Do not delete the attempt latch;
+  a worker stuck inside the kernel may still exist. SIGKILL is not a driver fix.
 
 Only `10-dash` paints. Conservative GC16 updates. Repeated flashes expected.
 No private keys/seeds printed. Dead kernel/dead panel cannot show feedback.
@@ -77,7 +81,9 @@ Device: one change per boot. Test gadget → IP → key login/PTY → reboot/rec
 Pinned modules: `fsl_otg_arc`, `arcotg_udc`, `g_ether`. Match `3.0.35-lab126`.
 Never force-load. Verify Mac CDC Ethernet; RNDIS alone proves nothing.
 Main and diags USB stacks differ. Diags works ≠ main works.
-Never write `1` to `/proc/asession` (host mode). No live storage/network switching.
+No `/proc/asession` role writes: `0` is not gadget enable; the tested service
+restarted at that write. Exact signal still unknown. Check binding, not module presence.
+No live storage/network switching. Competing gadgets are refused.
 Multiple Kindles need unique seeds, keys, and MACs. SSH edits are not releases.
 
 Inputs: [pinned provenance](pinned-inputs.md).

@@ -51,10 +51,12 @@ private_dir "$STATE" && private_file "$STATE/seed" \
 
 status starting "waiting for USB" || fail "could not publish panel status"
 start=$(uptime_s) || fail "no uptime clock for USB readiness"
-deadline=$((start + 10))
+# USB supervisor owns a 15-second whole-setup deadline; allow it to finish.
+deadline=$((start + 20))
 polls=0
-while [ ! -f /var/run/dash-usbnet-ready ]; do
+while :; do
 	[ ! -f /var/run/dash-usbnet-failed ] || fail "USB network setup failed; see 20-usbnet log"
+	[ ! -f /var/run/dash-usbnet-ready ] || break
 	now=$(uptime_s) || fail "lost uptime clock"
 	[ "$now" -lt "$deadline" ] && [ "$polls" -lt 10000 ] \
 		|| fail "USB network is not ready"
