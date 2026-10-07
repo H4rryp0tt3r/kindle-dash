@@ -11,7 +11,10 @@ immutable, so a tag per release is an alias with nothing to add.
 
 ## [Unreleased]
 
-<!-- CHANGELOG-PLACEHOLDER -->
+### Changed
+
+- Initialize Backlog.md through its CLI. Add deferred supervisor-simplification
+  task and root index. No runtime changes or new build dependencies.
 
 ## [0.3.2] — 2026-10-06
 
