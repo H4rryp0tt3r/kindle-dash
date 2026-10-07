@@ -11,7 +11,17 @@ immutable, so a tag per release is an alias with nothing to add.
 
 ## [Unreleased]
 
-<!-- CHANGELOG-PLACEHOLDER -->
+### Fixed
+
+- USB setup no longer writes `/proc/asession=0` before loading the controller.
+  The 0.3.2 boot repeated that step 447 times without reaching `arcotg_udc`.
+- Verify OTG/controller binding, reject competing gadgets, and supervise one
+  bounded attempt per boot. Record exit/signal and kernel diagnostics; no retries
+  after worker failure or timeout. Panel stays readable. Driver enumeration still
+  needs hardware validation.
+- Cover fatal exits, stalls, stale state, loaded-but-unbound drivers, readiness
+  failures and device-shell behavior in regression tests. SSH waits for the USB
+  setup deadline and rejects a failed state even with a stale ready marker.
 
 ## [0.3.2] — 2026-10-06
 

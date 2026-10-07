@@ -1,64 +1,85 @@
 #!/bin/busybox sh
-# Dash OS -- USB Ethernet maintenance link. Storage stays in diagnostics.
-# Keep the gadget loaded when SSH restarts; the panel service is independent.
+# Dash OS -- one supervised USB setup attempt. Storage stays in diagnostics.
+# Never force an OTG role through /proc/asession: the stock gadget path binds it.
 PATH=/bin:/sbin
 export PATH
 LOG=/var/log/dash.log
+case "$#:$*" in
+	0:) exec /bin/usb-supervise >>"$LOG" 2>&1 ;;
+	1:setup) ;;
+	*) printf 'usage: 20-usbnet/run [setup]\n' >&2; exit 2 ;;
+esac
+
+# The supervisor captures every worker diagnostic, signal, and whole-setup timeout.
 MODULES=/lib/modules/3.0.35-lab126
-READY=/var/run/dash-usbnet-ready
+DRIVERS=/sys/bus/platform/drivers
 FAILED=/var/run/dash-usbnet-failed
-STATUS=/var/run/dash-usbnet.status
+STATUS=/var/run/dash-usbnet-worker.status
 status() {
+	# A timed-out kernel call may resume later; never let that worker advance.
+	[ ! -e "$FAILED" ] && [ ! -L "$FAILED" ] || return 1
 	printf '%s\n%s\n' "$1" "$2" >"$STATUS.new" && mv "$STATUS.new" "$STATUS"
 }
-
 say() {
 	echo "$(cut -d. -f1 /proc/uptime 2>/dev/null)s  20-usbnet: $*" >>"$LOG"
 }
-park() {
-	exec tail -f /dev/null 2>/dev/null
-}
 fail() {
 	say "unavailable: $*"
-	status failed "$*" || say "could not publish panel status"
-	rm -f "$READY"
-	printf '%s\n' "$*" >"$FAILED"
-	dmesg >>"$LOG" 2>&1
-	park
+	status failed "$*" || say "could not publish worker status"
+	exit 1
 }
 uptime_s() {
 	read -r up rest </proc/uptime || return 1
-	printf '%s\n' "${up%%.*}"
+	up=${up%%.*}
+	case "$up" in ''|*[!0-9]*) return 1 ;; esac
+	printf '%s\n' "$up"
 }
 load() {
 	module=$1
 	shift
+	status starting "loading $module" || fail "could not publish worker status"
 	if grep -q "^$module " /proc/modules; then
 		say "$module already loaded"
 		return
 	fi
 	[ -f "$MODULES/$module.ko" ] && [ ! -L "$MODULES/$module.ko" ] \
-		|| fail "missing module $module"
-	status starting "loading $module" || fail "could not publish panel status"
+		|| fail "missing or unsafe module $module"
 	say "loading $module"
-	insmod "$MODULES/$module.ko" "$@" >>"$LOG" 2>&1 \
-		|| fail "loading $module failed"
+	insmod "$MODULES/$module.ko" "$@" || fail "loading $module failed"
+	grep -q "^$module " /proc/modules || fail "$module did not register"
+}
+bound() {
+	driver=$1
+	status starting "checking $driver binding" || fail "could not publish worker status"
+	[ -d "$DRIVERS/$driver" ] || fail "$driver did not register"
+	driver_path=$(readlink -f "$DRIVERS/$driver") || fail "cannot inspect $driver"
+	# sysfs module/subsystem links alone do not prove a successful device probe.
+	for device in "$DRIVERS/$driver"/*; do
+		[ -L "$device" ] && [ -d "$device" ] && [ -L "$device/driver" ] || continue
+		binding=$(readlink -f "$device/driver") || continue
+		if [ "$binding" = "$driver_path" ]; then
+			say "$driver bound to ${device##*/}"
+			return
+		fi
+	done
+	fail "$driver has no bound device"
 }
 
-rm -f "$READY" "$FAILED"
-status starting "checking gadget modules" || fail "could not publish panel status"
+status starting "checking gadget modules" || fail "could not publish worker status"
 [ "$(uname -r)" = 3.0.35-lab126 ] || fail "kernel release does not match modules"
+[ -r /proc/modules ] || fail "cannot inspect loaded modules"
+for gadget in g_file_storage g_serial g_multi g_mass_storage g_cdc; do
+	grep -q "^$gadget " /proc/modules && fail "competing gadget $gadget is loaded"
+done
 load fsl_otg_arc
-# The verified lab126 interface selects peripheral mode with 0, NOT 1 (host).
-if [ -e /proc/asession ]; then
-	say "selecting USB peripheral mode (/proc/asession=0)"
-	printf '0\n' >/proc/asession || fail "could not select peripheral mode"
-fi
+bound fsl-usb2-otg
 load arcotg_udc
-load g_ether host_addr=02:00:00:00:00:01 dev_addr=02:00:00:00:00:02
+bound fsl-usb2-udc
+load g_ether use_eem=0 host_addr=02:00:00:00:00:01 dev_addr=02:00:00:00:00:02
 
+status starting "waiting for usb0" || fail "could not publish worker status"
 start=$(uptime_s) || fail "no uptime clock for USB readiness"
-deadline=$((start + 10))
+deadline=$((start + 5))
 polls=0
 while [ ! -d /sys/class/net/usb0 ]; do
 	now=$(uptime_s) || fail "lost uptime clock"
@@ -66,14 +87,17 @@ while [ ! -d /sys/class/net/usb0 ]; do
 		|| fail "usb0 did not appear"
 	polls=$((polls + 1))
 done
-status starting "configuring usb0" || fail "could not publish panel status"
+status starting "configuring usb0" || fail "could not publish worker status"
 say "configuring usb0 as 192.168.15.244/24 (no default route)"
-ip addr replace 192.168.15.244/24 dev usb0 >>"$LOG" 2>&1 \
-	|| fail "setting USB address failed"
-ip link set dev usb0 up >>"$LOG" 2>&1 || fail "bringing usb0 up failed"
-ip -4 addr show dev usb0 | grep -q 'inet 192\.168\.15\.244/24 ' \
+ip addr replace 192.168.15.244/24 dev usb0 || fail "setting USB address failed"
+ip link set dev usb0 up || fail "bringing usb0 up failed"
+address=$(ip -4 addr show dev usb0) || fail "reading USB address failed"
+printf '%s\n' "$address" | grep -q 'inet 192\.168\.15\.244/24 ' \
 	|| fail "USB address verification failed"
-printf '192.168.15.244/24\n' >"$READY" || fail "could not record readiness"
-status ready "192.168.15.244/24" || fail "could not publish panel status"
-say "ready; Mac USB Ethernet address is 192.168.15.201/24"
-park
+link=$(ip link show dev usb0) || fail "reading USB link failed"
+printf '%s\n' "$link" | grep -qE '<([^>]*,)?UP(,|>)' \
+	|| fail "USB link verification failed"
+# Only the supervisor publishes readiness after this worker exits successfully.
+status starting "setup complete" || fail "could not publish worker status"
+say "setup complete; waiting for supervisor verification"
+exit 0

@@ -211,7 +211,7 @@ mke2fs -q -F -t ext3 -m 0 -L dash-root -U '"$MKE2FS_UUID"' \
 rm -rf /s/verify && mkdir -p /s/verify
 debugfs -R "rdump / /s/verify" /out/rootfs.img >/dev/null 2>&1
 fail=0
-for f in bin/busybox bin/screen bin/dash-status bin/ssh-seed bin/dropbearkey sbin/dropbear sbin/runit \
+for f in bin/busybox bin/screen bin/dash-status bin/usb-supervise bin/ssh-seed bin/dropbearkey sbin/dropbear sbin/runit \
 	 etc/runit/1 etc/runit/2 etc/runit/3 \
 	 service/10-dash/run service/20-usbnet/run service/30-sshd/run; do
 	if [ ! -f "/s/verify/$f" ]; then
@@ -255,7 +255,7 @@ for module in fsl_otg_arc arcotg_udc g_ether; do
     arm-linux-gnueabi-readelf -p .modinfo "$f" | grep -q "vermagic=3.0.35-lab126 " || { echo "FAIL: module vermagic $module" >&2; fail=1; }
 done
 # Check the bytes extracted from the artifact, not just the staging executables.
-for f in bin/screen bin/dash-status bin/ssh-seed bin/dropbearkey sbin/dropbear; do
+for f in bin/screen bin/dash-status bin/usb-supervise bin/ssh-seed bin/dropbearkey sbin/dropbear; do
     arm-linux-gnueabi-readelf -h "/s/verify/$f" > /tmp/elf-header
     if ! grep -q "Machine:.*ARM" /tmp/elf-header || ! grep -q "Class:.*ELF32" /tmp/elf-header || grep -q "hard-float ABI" /tmp/elf-header; then
         echo "FAIL: not ELF32 ARM soft-float $f" >&2; fail=1
@@ -600,6 +600,7 @@ cmd_build() {
 	cmd_userland "$HERE/src" "$USRLAND"
 	install -m 0755 "$USRLAND/screen" "$STAGE/bin/screen"
 	install -m 0755 "$USRLAND/dash-status" "$STAGE/bin/dash-status"
+	install -m 0755 "$USRLAND/usb-supervise" "$STAGE/bin/usb-supervise"
 	install -m 0755 "$USRLAND/ssh-seed" "$STAGE/bin/ssh-seed"
 	install -m 0755 "$HERE/third-party/dropbear/dropbear" "$STAGE/sbin/dropbear"
 	install -m 0755 "$HERE/third-party/dropbear/dropbearkey" "$STAGE/bin/dropbearkey"
