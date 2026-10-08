@@ -11,7 +11,11 @@ immutable, so a tag per release is an alias with nothing to add.
 
 ## [Unreleased]
 
-<!-- CHANGELOG-PLACEHOLDER -->
+### Added
+
+- Test candidate panel userspace over USB SSH in a disposable chroot, without
+  reflashing or rebooting. Preserve installed USB/SSH and device identity; restore
+  the installed panel and clean up mounts after the bounded test.
 
 ## [0.3.4] — 2026-10-07
 
