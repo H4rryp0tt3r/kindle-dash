@@ -85,7 +85,8 @@ Full-image boot validation still uses the runbook. No reboot is performed.
 ## Screen + failures
 
 Hello World/version/uptime/kernel stay. USB/SSH state + latest 20 log rows added.
-New output → refresh. Busy refresh → combine lines. Idle → no refresh.
+First frame is immediate. Later output is batched for 200 ms without extending
+that deadline for each event. Busy refresh → combine lines. Idle → no refresh.
 
 - `USB: configured`: local interface ready. **Not proof Mac connected.**
 - `SSH: listening`: Dropbear owns USB port 22.
@@ -97,7 +98,14 @@ New output → refresh. Busy refresh → combine lines. Idle → no refresh.
 - After USB stop/restart, reboot to retry. Do not delete the attempt latch;
   a worker stuck inside the kernel may still exist. SIGKILL is not a driver fix.
 
-Only `10-dash` paints. Conservative GC16 updates. Repeated flashes expected.
+Only `10-dash` paints. Conservative GC16/FULL updates. The first frame and the
+next dirty frame after eight ordinary updates get black → white → text clearing
+passes, with a completion wait after each. Extra flashes/latency are expected;
+the cadence still needs visual device validation. No timer refreshes idle text.
+Renderer errors park the owner, not retry; pass diagnostics reach the log before
+the ioctl. A stuck renderer must finish before any replacement owner starts.
+Stage 1 sets raw frontlight brightness 50 once, with an info log and no readback
+or validation; this is not a percentage and cannot affect pre-userspace light.
 No private keys/seeds printed. Dead kernel/dead panel cannot show feedback.
 USB broken? Boot diags. Read `/Volumes/dash-root/var/log/dash.log`.
 

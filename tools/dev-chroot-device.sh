@@ -103,8 +103,8 @@ chroot "$ROOT" /bin/busybox sh /service/10-dash/run &
 child=$!
 sleep 10
 kill -0 "$child"
-# ioctl errors currently do not force a nonzero renderer exit; inspect diagnostics.
-if grep -E 'screen failed|screen:|status unavailable|panel service parked' "$ROOT/var/log/dash.log"; then
+# Successful pass-progress diagnostics are expected; only errors fail the test.
+if grep -E 'screen failed|screen: screen:|status unavailable|panel service parked' "$ROOT/var/log/dash.log"; then
 	exit 1
 fi
 [ -s "$ROOT/var/run/dash.frame" ] || exit 1

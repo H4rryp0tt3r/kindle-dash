@@ -43,7 +43,8 @@ class ChrootTests(unittest.TestCase):
 
     def test_device_runner_normal_and_failure_cleanup(self):
         runner = (HERE / "tools/dev-chroot-device.sh").read_text()
-        for scenario in ("success", "mount-failure", "unmount-failure", "busy-lock"):
+        for scenario in ("success", "renderer-progress", "renderer-failure",
+                         "mount-failure", "unmount-failure", "busy-lock"):
             with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as directory:
                 base = Path(directory)
                 root = base / "candidate"
@@ -86,6 +87,10 @@ umount)
 chroot)
     if [[ "$*" == *'/service/10-dash/run'* ]]; then
         printf 'mock candidate frame\n' > "$1/var/run/dash.frame"
+        case "$SCENARIO" in
+            renderer-progress) printf '10-dash: screen: UPDATE pass=black marker=2 SEND_UPDATE\n10-dash: screen: UPDATE pass=black marker=2 WAIT_FOR_UPDATE_COMPLETE\n' >> "$1/var/log/dash.log" ;;
+            renderer-failure) printf '10-dash: screen: screen: SEND_UPDATE: Input/output error\n' >> "$1/var/log/dash.log" ;;
+        esac
         exec /bin/sleep 60
     fi ;;
 *) exit 1 ;;
@@ -106,7 +111,7 @@ esac
                            MOUNTS=str(mounts), SCENARIO=scenario)
                 result = subprocess.run(["bash", str(path), str(root)], env=env,
                                         capture_output=True, text=True, timeout=10)
-                self.assertEqual(result.returncode, 0 if scenario == "success" else 1,
+                self.assertEqual(result.returncode, 0 if scenario in ("success", "renderer-progress") else 1,
                                  result.stdout + result.stderr)
                 self.assertEqual(state.read_text().strip(), "run")
                 self.assertEqual(root.exists(), scenario == "unmount-failure")

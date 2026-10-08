@@ -1,8 +1,8 @@
 /*
  * dash-status -- the single panel owner: a current-boot streaming console.
  * Watch logs/status with inotify, block while idle, and compose one conservative
- * screen update per frame. Output arriving during refresh is coalesced, not lost
- * in an unbounded repaint queue. No crates or framebuffer ABI changes.
+ * frame at a time, with occasional black/white clearing passes. Output arriving
+ * during refresh or a short batching window is coalesced, not queued. No crates.
  */
 use std::ffi::{c_char, c_int};
 #[cfg(test)]
@@ -10,10 +10,10 @@ use std::fs::OpenOptions;
 use std::fs::{self, File};
 #[cfg(test)]
 use std::io::Write;
-use std::io::{self, Read, Seek, SeekFrom};
+use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 const LOG: &str = "/var/log/dash.log";
@@ -22,6 +22,8 @@ const LIMIT: usize = 65536;
 const WIDTH: usize = 43; // renderer allows 47; leave two-space margins
 const LOG_ROWS: usize = 20;
 const WATCHDOG: Duration = Duration::from_secs(20);
+const COALESCE: Duration = Duration::from_millis(200);
+const CLEAN_AFTER: u32 = 8;
 const MASK: u32 = 0x0000_0002 | 0x0000_0008 | 0x0000_0080 | 0x0000_0100; // modify/close-write/move-to/create
 
 #[repr(C)]
@@ -270,6 +272,63 @@ fn listener(pid: u32) -> io::Result<()> {
         wait(-1, 25)?;
     }
 }
+// A dirty burst gets one fixed deadline; later events cannot postpone it.
+// The initial frame is immediate, and a quiet panel has no repaint deadline.
+#[derive(Default)]
+struct Refresh {
+    displayed: bool,
+    since_clean: u32,
+    due: Option<Instant>,
+}
+impl Refresh {
+    fn observe(&mut self, changed: bool, now: Instant) {
+        if !changed {
+            self.due = None;
+        } else if self.due.is_none() {
+            self.due = Some(if self.displayed { now + COALESCE } else { now });
+        }
+    }
+    fn ready(&self, now: Instant) -> bool {
+        self.due.is_some_and(|due| now >= due)
+    }
+    fn clean(&self) -> bool {
+        !self.displayed || self.since_clean >= CLEAN_AFTER
+    }
+    fn displayed(&mut self, clean: bool) {
+        self.displayed = true;
+        self.since_clean = if clean { 0 } else { self.since_clean + 1 };
+        self.due = None;
+    }
+}
+fn poll_timeout(now: Instant, deadlines: &[Option<Instant>]) -> c_int {
+    deadlines.iter().flatten().map(|due| {
+        let duration = due.saturating_duration_since(now);
+        // Round up so the final fraction of a millisecond cannot busy-poll.
+        duration.as_millis().saturating_add(u128::from(duration.subsec_nanos() % 1_000_000 != 0))
+            .min(c_int::MAX as u128) as c_int
+    }).min().unwrap_or(-1)
+}
+fn paint(screen: &Path, frame: &Path, clean: bool) -> io::Result<()> {
+    let mut command = Command::new(screen);
+    if clean {
+        command.arg("--clean");
+    }
+    let mut child = command.arg(frame).stdout(Stdio::null()).stderr(Stdio::piped()).spawn()?;
+    // Forward before waiting: diagnostics must reach the boot log even if an
+    // ioctl hangs. The prefix excludes them from the displayed log tail.
+    let diagnostics = (|| {
+        for line in BufReader::new(child.stderr.take().unwrap()).lines() {
+            eprintln!("10-dash: screen: {}", printable(&line?));
+        }
+        Ok::<_, io::Error>(())
+    })();
+    let status = child.wait()?;
+    diagnostics?;
+    if !status.success() {
+        return Err(io::Error::other(format!("screen failed: {status}")));
+    }
+    Ok(())
+}
 fn monitor(
     log: &Path,
     run: &Path,
@@ -286,6 +345,7 @@ fn monitor(
     let mut ssh = Status::pending();
     let mut last_expired = false;
     let mut first = true;
+    let mut refresh = Refresh::default();
     loop {
         watch.drain()?;
         let logs = log_tail(log).unwrap_or_default();
@@ -293,22 +353,25 @@ fn monitor(
         let s = read_status(&run.join("dash-sshd.status"));
         let expired = Instant::now() >= deadline;
         let show_timeout = expired && (!u.terminal() || !s.terminal());
-        // Intermediate stages are still shown with streamed log lines, but the
-        // clock alone never makes the screen repaint continuously.
-        if first || logs != last_logs || u != usb || s != ssh || show_timeout != last_expired {
+        // Compare with the last displayed state, not intermediate observations,
+        // so a burst cannot lose its final state. Clock changes alone stay idle.
+        let changed = first || logs != last_logs || u != usb || s != ssh
+            || show_timeout != last_expired;
+        let now = Instant::now();
+        refresh.observe(changed, now);
+        if refresh.ready(now) {
             let uptime = fs::read_to_string("/proc/uptime").unwrap_or_default();
             let uptime = uptime.split('.').next().unwrap_or("?");
             let next = frame(release, kernel, uptime, &u, &s, expired, &logs);
             if next != previous {
-                fs::write(run.join("dash.frame"), &next)?;
-                let output = Command::new(screen).arg(run.join("dash.frame")).output()?;
-                if !output.status.success() {
-                    eprintln!("10-dash: screen failed: {}", output.status);
-                }
-                for line in String::from_utf8_lossy(&output.stderr).lines() {
-                    eprintln!("10-dash: screen: {}", printable(line));
-                }
+                let clean = refresh.clean();
+                let path = run.join("dash.frame");
+                fs::write(&path, &next)?;
+                paint(screen, &path, clean)?;
                 previous = next;
+                refresh.displayed(clean);
+            } else {
+                refresh.due = None;
             }
             first = false;
             last_logs = logs;
@@ -316,14 +379,10 @@ fn monitor(
             ssh = s;
             last_expired = show_timeout;
         }
-        let timeout = if !expired {
-            deadline
-                .saturating_duration_since(Instant::now())
-                .as_millis()
-                .min(i32::MAX as u128) as i32
-        } else {
-            -1
-        };
+        let now = Instant::now();
+        let timeout = poll_timeout(now, &[
+            (!expired).then_some(deadline), refresh.due,
+        ]);
         wait(watch.0.as_raw_fd(), timeout)?;
     }
 }
@@ -370,6 +429,55 @@ fn main() {
 mod tests {
     use super::*;
     use std::os::unix::fs::{symlink, PermissionsExt};
+    #[test]
+    fn refresh_is_immediate_once_then_batches_with_a_fixed_deadline() {
+        let now = Instant::now();
+        let mut refresh = Refresh::default();
+        refresh.observe(true, now);
+        assert!(refresh.ready(now));
+        assert!(refresh.clean());
+        refresh.displayed(true);
+        assert!(!refresh.ready(now));
+        refresh.observe(true, now);
+        let due = refresh.due;
+        for ms in 1..200 {
+            refresh.observe(true, now + Duration::from_millis(ms));
+            assert_eq!(refresh.due, due);
+            assert!(!refresh.ready(now + Duration::from_millis(ms)));
+        }
+        assert!(refresh.ready(now + COALESCE));
+        refresh.observe(false, now + COALESCE);
+        assert_eq!(refresh.due, None);
+        assert_eq!(poll_timeout(now, &[None]), -1);
+    }
+    #[test]
+    fn clean_after_eight_successful_ordinary_frames_not_observations() {
+        let mut refresh = Refresh::default();
+        refresh.displayed(true);
+        for _ in 0..CLEAN_AFTER {
+            assert!(!refresh.clean());
+            refresh.observe(true, Instant::now());
+            refresh.observe(false, Instant::now());
+            refresh.displayed(false);
+        }
+        assert!(refresh.clean());
+        // Merely deciding to clean does not advance/reset the count.
+        assert!(refresh.clean());
+        refresh.displayed(true);
+        assert!(!refresh.clean());
+        assert_eq!(refresh.since_clean, 0);
+    }
+    #[test]
+    fn poll_uses_the_earliest_deadline_and_rounds_up() {
+        let now = Instant::now();
+        assert_eq!(poll_timeout(now, &[None, Some(now + COALESCE)]), 200);
+        assert_eq!(poll_timeout(now, &[Some(now + COALESCE), Some(now + Duration::from_micros(500))]), 1);
+        assert_eq!(poll_timeout(now, &[Some(now)]), 0);
+    }
+    #[test]
+    fn paint_propagates_renderer_failure() {
+        assert!(paint(Path::new("/bin/false"), Path::new("/unused"), true).is_err());
+    }
     #[test]
     fn status_is_bounded_and_explicit() {
         assert_eq!(parse_status("ready\nUSB address\n").state, "ready");
@@ -452,9 +560,9 @@ mod tests {
         let log = p.join("log/dash.log");
         fs::write(&log, "0s stage1: start, mounts up\nUSB first\n").unwrap();
         let screen = p.join("screen");
-        // Stop the monitor after the fourth frame by replacing the executable
-        // with a missing path. The clock and writes are test-only, never device.
-        fs::write(&screen, format!("#!/bin/sh\nprintf 'frame\\n' >> '{}/frames'\ncp \"$1\" '{}/latest'\nprintf '10-dash: renderer output\\n' >> '{}'\n",p.display(),p.display(),log.display())).unwrap();
+        // Stop the monitor by replacing the executable with a missing path.
+        // The clock and writes are test-only, never device.
+        fs::write(&screen, format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}/args'\n[ \"$1\" != --clean ] || shift\ncp \"$1\" '{}/latest'\nprintf '10-dash: renderer output\\n' >> '{}'\nprintf 'frame\\n' >> '{}/frames'\n",p.display(),p.display(),log.display(),p.display())).unwrap();
         fs::set_permissions(&screen, fs::Permissions::from_mode(0o755)).unwrap();
         let log2 = log.clone();
         let run = p.join("run");
@@ -466,7 +574,7 @@ mod tests {
                 &screen2,
                 "test",
                 "kernel",
-                Duration::from_millis(100),
+                Duration::from_millis(700),
             )
         });
         let wait_for = |count: usize| {
@@ -522,6 +630,26 @@ mod tests {
         assert!(fs::read_to_string(p.join("latest"))
             .unwrap()
             .contains("new streamed line"));
+        // Several writes within a dirty window produce just the latest frame.
+        for i in 0..5 {
+            fs::write(p.join("run/dash-sshd.status"), format!("ready\nburst {i}\n")).unwrap();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        wait_for(6);
+        std::thread::sleep(COALESCE + Duration::from_millis(50));
+        assert_eq!(fs::read_to_string(p.join("frames")).unwrap().lines().count(), 6);
+        assert!(fs::read_to_string(p.join("latest")).unwrap().contains("burst 4"));
+        for count in 7..=10 {
+            OpenOptions::new().append(true).open(&log).unwrap()
+                .write_all(format!("cadence {count}\n").as_bytes()).unwrap();
+            wait_for(count);
+        }
+        let args = fs::read_to_string(p.join("args")).unwrap();
+        let clean: Vec<_> = args.lines().enumerate().filter_map(|(i, line)|
+            line.starts_with("--clean ").then_some(i + 1)).collect();
+        assert_eq!(clean, vec![1, 10]);
+        std::thread::sleep(COALESCE + Duration::from_millis(50));
+        assert_eq!(fs::read_to_string(p.join("frames")).unwrap().lines().count(), 10);
         fs::remove_file(&screen).unwrap();
         OpenOptions::new()
             .append(true)

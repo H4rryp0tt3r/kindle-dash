@@ -6,7 +6,12 @@
  * call re-reads the file and repaints the whole surface, so the last frame on
  * the panel is always the newest text.
  *
- * Usage: screen <file>
+ * Usage: screen [--clean] [<file>]      (no file: read stdin)
+ *
+ * --clean runs three full GC16 FULL updates, each sent and waited on in turn:
+ * all black, all white, then the text frame. It exists to scrub ghosting. Each
+ * pass logs to stderr BEFORE its ioctl, so the last line says which call hung.
+ * A failed send or wait stops the sequence and exits nonzero.
  *
  * UPDATE PARAMETERS ARE CONSERVATIVE ON PURPOSE: hist_bw=0, hist_gray=0,
  * temp=0. These are the only parameters measured to work on this device. The
@@ -50,6 +55,12 @@ const MAP_SHARED: i32 = 0x1;
 
 const UPDATE_MODE_FULL: u32 = 0x1;
 const WAVEFORM_MODE_GC16: u32 = 0x2;
+
+// Update markers are distinct and nonzero so a log or a kernel trace can tell
+// the passes apart. The text marker is the one the single-pass path always used.
+const MARKER_TEXT: u32 = 1;
+const MARKER_BLACK: u32 = 2;
+const MARKER_WHITE: u32 = 3;
 
 // Only the handful of libc entry points this program needs. c_ulong is 32-bit
 // on armel, so the ioctl request codes are u32 here (0xC008462F does not fit in
@@ -163,12 +174,22 @@ struct MxcfbUpdateData {
     alt_buffer_data: MxcfbAltBufferData,
 }
 
+// _IOWR('F', 0x2F, mxcfb_update_marker_data): the old 3.0.35 kernel copies 8
+// bytes in and out, so a bare u32 would let it write past the argument.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct MxcfbUpdateMarkerData {
+    update_marker: u32,
+    collision_test: u32,
+}
+
 // The ioctl payloads are memcpy-ed to the kernel; a layout mistake would be a
 // silent memory-corruption bug on the device, so pin the sizes.
 const _: () = {
     assert!(core::mem::size_of::<MxcfbRect>() == 16);
     assert!(core::mem::size_of::<MxcfbAltBufferData>() == 28);
     assert!(core::mem::size_of::<MxcfbUpdateData>() == 72);
+    assert!(core::mem::size_of::<MxcfbUpdateMarkerData>() == 8);
     assert!(core::mem::size_of::<FbVarScreeninfo>() == 160);
     assert!(core::mem::size_of::<FbFixScreeninfo>() == 68);
 };
@@ -349,7 +370,183 @@ fn visible_chars(w: usize, scale: usize, x0: isize) -> usize {
     (w - x0u) / (8 * scale)
 }
 
+/// Parsed command line. `screen <file>` and bare `screen` (stdin) are unchanged.
+#[derive(Debug, PartialEq)]
+struct Opts {
+    clean: bool,
+    path: Option<std::ffi::OsString>,
+}
+
+/// `--clean` is recognised anywhere before a `--`; `--` ends option parsing so a
+/// file literally named `--clean` is still reachable. Anything else is the file,
+/// as it always was, and extra arguments are ignored as before.
+fn parse_args<I: IntoIterator<Item = std::ffi::OsString>>(args: I) -> Opts {
+    let mut o = Opts { clean: false, path: None };
+    let mut opts_done = false;
+    for a in args {
+        if !opts_done && a == "--" {
+            opts_done = true;
+        } else if !opts_done && a == "--clean" {
+            o.clean = true;
+        } else if o.path.is_none() {
+            o.path = Some(a);
+        }
+    }
+    o
+}
+
+/// Framebuffer geometry: visible width/height, bits per pixel, driver stride.
+#[derive(Clone, Copy)]
+struct Geom {
+    w: usize,
+    h: usize,
+    bpp: usize,
+    stride: usize,
+}
+
+/// Set every VISIBLE byte of every row to `val`, leaving the stride gutter
+/// alone. See fill_len.
+fn fill_visible(fbp: &mut [u8], g: Geom, val: u8) {
+    let fill = fill_len(g.w, g.bpp);
+    for y in 0..g.h {
+        let off = y * g.stride;
+        if let Some(row) = fbp.get_mut(off..off + fill) {
+            row.fill(val);
+        }
+    }
+}
+
+/// White background plus the text lines at scale 2.
+fn render_text(fbp: &mut [u8], g: Geom, lines: &[Vec<u8>]) {
+    let (h, stride) = (g.h, g.stride);
+    fill_visible(fbp, g, 0xFF);
+
+    // draw lines at scale 2
+    let scale = 2usize;
+    let x0 = 4isize;
+    let y0 = 4isize;
+    let charw = 8 * scale;
+    let rowh = 8 * scale;
+    for (i, line) in lines.iter().enumerate() {
+        for (c, &byte) in line.iter().enumerate() {
+            if c >= MAXLEN {
+                break;
+            }
+            let gl = glyph(byte);
+            for r in 0..8usize {
+                for b in 0..8usize {
+                    if ((gl[r] >> b) & 1) == 0 {
+                        continue;
+                    }
+                    let px = x0 + c as isize * charw as isize + b as isize * scale as isize;
+                    let py = y0 + i as isize * (rowh as isize + 2) + r as isize * scale as isize;
+                    for s in 0..scale {
+                        let yy = py + s as isize;
+                        if yy >= h as isize {
+                            break;
+                        }
+                        let off = yy as usize * stride + px as usize;
+                        // NOTE: this writes scale BYTES, which assumes 1 byte per
+                        // pixel. Deliberately unguarded horizontally, exactly as
+                        // before: a line wider than (width-4)/(8*scale) = 47
+                        // characters runs past the visible width and into the next
+                        // row. Fixing that is a separate, visible change.
+                        if let Some(px_bytes) = fbp.get_mut(off..off + scale) {
+                            px_bytes.fill(0x00);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The two panel calls, behind a seam so pass order and failure handling can be
+/// tested without hardware. `fb` is the framebuffer as it stands at the call;
+/// the real driver reads it through the mapping and ignores the argument.
+trait Panel {
+    fn send(&mut self, upd: &mut MxcfbUpdateData, fb: &[u8]) -> io::Result<()>;
+    fn wait(&mut self, marker: &mut MxcfbUpdateMarkerData) -> io::Result<()>;
+}
+
+struct FbPanel(i32);
+
+impl Panel for FbPanel {
+    fn send(&mut self, upd: &mut MxcfbUpdateData, _fb: &[u8]) -> io::Result<()> {
+        if unsafe { ioctl(self.0, MXCFB_SEND_UPDATE, upd as *mut _ as *mut c_void) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+    fn wait(&mut self, marker: &mut MxcfbUpdateMarkerData) -> io::Result<()> {
+        let p = marker as *mut _ as *mut c_void;
+        if unsafe { ioctl(self.0, MXCFB_WAIT_FOR_UPDATE_COMPLETE, p) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+}
+
+/// The one update path: full-screen GC16 FULL, hist/temp/flags all zero, sent
+/// and then waited on. Logs before each ioctl; the first failure is returned.
+fn update<P: Panel, L: Write>(
+    p: &mut P,
+    log: &mut L,
+    g: Geom,
+    fbp: &[u8],
+    pass: &str,
+    marker: u32,
+) -> Result<(), String> {
+    let mut upd = MxcfbUpdateData {
+        update_region: MxcfbRect {
+            top: 0,
+            left: 0,
+            width: g.w as u32,
+            height: g.h as u32,
+        },
+        waveform_mode: WAVEFORM_MODE_GC16,
+        update_mode: UPDATE_MODE_FULL,
+        update_marker: marker,
+        hist_bw_waveform_mode: 0,
+        hist_gray_waveform_mode: 0,
+        temp: 0,
+        flags: 0,
+        alt_buffer_data: MxcfbAltBufferData::default(),
+    };
+    let _ = writeln!(log, "UPDATE pass={} marker={} SEND_UPDATE", pass, marker);
+    p.send(&mut upd, fbp)
+        .map_err(|e| format!("SEND_UPDATE ({}): {}", pass, e))?;
+    let mut m = MxcfbUpdateMarkerData {
+        update_marker: marker,
+        collision_test: 0,
+    };
+    let _ = writeln!(log, "UPDATE pass={} marker={} WAIT_FOR_UPDATE_COMPLETE", pass, marker);
+    p.wait(&mut m).map_err(|e| format!("WAIT ({}): {}", pass, e))
+}
+
+/// Paint and push the frames: just the text, or black, white, text if `clean`.
+/// Stops at the first failed pass.
+fn run_passes<P: Panel, L: Write>(
+    p: &mut P,
+    log: &mut L,
+    g: Geom,
+    fbp: &mut [u8],
+    lines: &[Vec<u8>],
+    clean: bool,
+) -> Result<(), String> {
+    if clean {
+        fill_visible(fbp, g, 0x00);
+        update(p, log, g, fbp, "black", MARKER_BLACK)?;
+        fill_visible(fbp, g, 0xFF);
+        update(p, log, g, fbp, "white", MARKER_WHITE)?;
+    }
+    render_text(fbp, g, lines);
+    update(p, log, g, fbp, "text", MARKER_TEXT)
+}
+
 fn main() {
+    let opts = parse_args(env::args_os().skip(1));
+
     let fb = unsafe { open(b"/dev/fb0\0".as_ptr(), O_RDWR) };
     if fb < 0 {
         die("open /dev/fb0");
@@ -395,7 +592,7 @@ fn main() {
     let fbp: &mut [u8] = unsafe { slice::from_raw_parts_mut(ptr as *mut u8, smem) };
 
     // Read the report file (or stdin).
-    let lines = match env::args_os().nth(1) {
+    let lines = match opts.path {
         Some(path) => match File::open(path) {
             Ok(f) => read_records(f),
             Err(_) => die("open report"),
@@ -403,85 +600,16 @@ fn main() {
         None => read_records(io::stdin().lock()),
     };
 
-    // White background. See fill_len: this is the visible row width in bytes.
-    let fill = fill_len(w, bpp);
-    for y in 0..h {
-        let off = y * stride;
-        if let Some(row) = fbp.get_mut(off..off + fill) {
-            row.fill(0xFF);
-        }
-    }
-
-    // draw lines at scale 2
-    let scale = 2usize;
-    let x0 = 4isize;
-    let y0 = 4isize;
-    let charw = 8 * scale;
-    let rowh = 8 * scale;
-    for (i, line) in lines.iter().enumerate() {
-        for (c, &byte) in line.iter().enumerate() {
-            if c >= MAXLEN {
-                break;
-            }
-            let g = glyph(byte);
-            for r in 0..8usize {
-                for b in 0..8usize {
-                    if ((g[r] >> b) & 1) == 0 {
-                        continue;
-                    }
-                    let px = x0 + c as isize * charw as isize + b as isize * scale as isize;
-                    let py = y0 + i as isize * (rowh as isize + 2) + r as isize * scale as isize;
-                    for s in 0..scale {
-                        let yy = py + s as isize;
-                        if yy >= h as isize {
-                            break;
-                        }
-                        let off = yy as usize * stride + px as usize;
-                        // NOTE: this writes scale BYTES, which assumes 1 byte per
-                        // pixel. Deliberately unguarded horizontally, exactly as
-                        // before: a line wider than (width-4)/(8*scale) = 47
-                        // characters runs past the visible width and into the next
-                        // row. Fixing that is a separate, visible change.
-                        if let Some(px_bytes) = fbp.get_mut(off..off + scale) {
-                            px_bytes.fill(0x00);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    let mut upd = MxcfbUpdateData {
-        update_region: MxcfbRect {
-            top: 0,
-            left: 0,
-            width: w as u32,
-            height: h as u32,
-        },
-        waveform_mode: WAVEFORM_MODE_GC16,
-        update_mode: UPDATE_MODE_FULL,
-        update_marker: 1,
-        hist_bw_waveform_mode: 0,
-        hist_gray_waveform_mode: 0,
-        temp: 0,
-        flags: 0,
-        alt_buffer_data: MxcfbAltBufferData::default(),
-    };
-
-    if unsafe { ioctl(fb, MXCFB_SEND_UPDATE, &mut upd as *mut _ as *mut c_void) } < 0 {
-        let e = io::Error::last_os_error();
-        let _ = writeln!(io::stderr(), "SEND_UPDATE: {}", e);
-    } else {
-        let mut m = upd.update_marker;
-        if unsafe { ioctl(fb, MXCFB_WAIT_FOR_UPDATE_COMPLETE, &mut m as *mut _ as *mut c_void) } < 0 {
-            let e = io::Error::last_os_error();
-            let _ = writeln!(io::stderr(), "WAIT: {}", e);
-        }
-    }
+    let g = Geom { w, h, bpp, stride };
+    let result = run_passes(&mut FbPanel(fb), &mut io::stderr(), g, fbp, &lines, opts.clean);
 
     unsafe {
         munmap(ptr, smem);
         close(fb);
+    }
+    if let Err(e) = result {
+        let _ = writeln!(io::stderr(), "screen: {}", e);
+        exit(1);
     }
 }
 
@@ -601,5 +729,226 @@ mod tests {
     #[test]
     fn records_of_empty_input_is_empty() {
         assert!(read_records(&b""[..]).is_empty());
+    }
+
+    // ---- command line ----------------------------------------------------
+
+    fn args(a: &[&str]) -> Opts {
+        parse_args(a.iter().map(std::ffi::OsString::from))
+    }
+
+    #[test]
+    fn args_keep_file_and_stdin_forms() {
+        assert_eq!(args(&[]), Opts { clean: false, path: None });
+        assert_eq!(
+            args(&["/tmp/f"]),
+            Opts { clean: false, path: Some("/tmp/f".into()) }
+        );
+    }
+
+    #[test]
+    fn args_accept_clean_with_file_or_stdin() {
+        assert_eq!(args(&["--clean"]), Opts { clean: true, path: None });
+        assert_eq!(
+            args(&["--clean", "f"]),
+            Opts { clean: true, path: Some("f".into()) }
+        );
+        assert_eq!(
+            args(&["f", "--clean"]),
+            Opts { clean: true, path: Some("f".into()) }
+        );
+    }
+
+    #[test]
+    fn args_double_dash_allows_a_file_named_clean() {
+        assert_eq!(
+            args(&["--", "--clean"]),
+            Opts { clean: false, path: Some("--clean".into()) }
+        );
+    }
+
+    // ---- fill and gutter -------------------------------------------------
+
+    const G: Geom = Geom { w: 30, h: 24, bpp: 8, stride: 32 };
+
+    #[test]
+    fn fill_visible_respects_stride_gutter() {
+        let mut fb = vec![0x55u8; G.stride * G.h];
+        fill_visible(&mut fb, G, 0xFF);
+        for y in 0..G.h {
+            let row = &fb[y * G.stride..(y + 1) * G.stride];
+            assert!(row[..G.w].iter().all(|&b| b == 0xFF), "row {}", y);
+            assert!(row[G.w..].iter().all(|&b| b == 0x55), "gutter row {}", y);
+        }
+    }
+
+    #[test]
+    fn fill_visible_tolerates_a_short_buffer() {
+        let mut fb = vec![0u8; G.stride * 2];
+        fill_visible(&mut fb, G, 0xFF); // must not panic
+        assert!(fb[..G.w].iter().all(|&b| b == 0xFF));
+    }
+
+    // ---- passes and markers ----------------------------------------------
+
+    #[derive(Debug, PartialEq, Clone)]
+    enum Ev {
+        Send { marker: u32, fill: u8 },
+        Wait { marker: u32 },
+    }
+
+    #[derive(Default)]
+    struct Fake {
+        ev: Vec<Ev>,
+        upds: Vec<MxcfbUpdateData>,
+        fail_send: Option<usize>, // 0-based index of the send to fail
+        fail_wait: Option<usize>,
+        sends: usize,
+        waits: usize,
+    }
+
+    impl Panel for Fake {
+        fn send(&mut self, upd: &mut MxcfbUpdateData, fb: &[u8]) -> io::Result<()> {
+            // Uniform visible fill value (or 0xEE if the frame is not uniform).
+            let vis: Vec<u8> = (0..G.h)
+                .flat_map(|y| fb[y * G.stride..y * G.stride + G.w].to_vec())
+                .collect();
+            let fill = if vis.iter().all(|&b| b == vis[0]) { vis[0] } else { 0xEE };
+            self.ev.push(Ev::Send { marker: upd.update_marker, fill });
+            self.upds.push(*upd);
+            let n = self.sends;
+            self.sends += 1;
+            if self.fail_send == Some(n) {
+                return Err(io::Error::from_raw_os_error(22));
+            }
+            Ok(())
+        }
+        fn wait(&mut self, m: &mut MxcfbUpdateMarkerData) -> io::Result<()> {
+            self.ev.push(Ev::Wait { marker: m.update_marker });
+            let n = self.waits;
+            self.waits += 1;
+            if self.fail_wait == Some(n) {
+                return Err(io::Error::from_raw_os_error(110));
+            }
+            Ok(())
+        }
+    }
+
+    fn run(f: &mut Fake, clean: bool, lines: &[Vec<u8>]) -> (Result<(), String>, String, Vec<u8>) {
+        let mut fb = vec![0x55u8; G.stride * G.h];
+        let mut log = Vec::new();
+        let r = run_passes(f, &mut log, G, &mut fb, lines, clean);
+        (r, String::from_utf8(log).unwrap(), fb)
+    }
+
+    #[test]
+    fn plain_run_is_one_text_update() {
+        let mut f = Fake::default();
+        let (r, _, _) = run(&mut f, false, &[b"A".to_vec()]);
+        assert!(r.is_ok());
+        // Text frame is not uniform: white background plus black glyph pixels.
+        assert_eq!(
+            f.ev,
+            vec![Ev::Send { marker: MARKER_TEXT, fill: 0xEE }, Ev::Wait { marker: MARKER_TEXT }]
+        );
+    }
+
+    #[test]
+    fn clean_run_is_black_white_text_each_sent_then_waited() {
+        let mut f = Fake::default();
+        let (r, _, _) = run(&mut f, true, &[b"A".to_vec()]);
+        assert!(r.is_ok());
+        assert_eq!(
+            f.ev,
+            vec![
+                Ev::Send { marker: MARKER_BLACK, fill: 0x00 },
+                Ev::Wait { marker: MARKER_BLACK },
+                Ev::Send { marker: MARKER_WHITE, fill: 0xFF },
+                Ev::Wait { marker: MARKER_WHITE },
+                Ev::Send { marker: MARKER_TEXT, fill: 0xEE },
+                Ev::Wait { marker: MARKER_TEXT },
+            ]
+        );
+    }
+
+    #[test]
+    fn markers_are_nonzero_and_distinct() {
+        let m = [MARKER_TEXT, MARKER_BLACK, MARKER_WHITE];
+        assert!(m.iter().all(|&x| x != 0));
+        assert!(m[0] != m[1] && m[0] != m[2] && m[1] != m[2]);
+    }
+
+    #[test]
+    fn clean_text_pass_leaves_the_gutter_untouched() {
+        let mut f = Fake::default();
+        let (_, _, fb) = run(&mut f, true, &[b"A".to_vec()]);
+        for y in 0..G.h {
+            assert!(fb[y * G.stride + G.w..(y + 1) * G.stride].iter().all(|&b| b == 0x55));
+        }
+    }
+
+    #[test]
+    fn every_update_uses_conservative_params() {
+        let mut f = Fake::default();
+        assert!(run(&mut f, true, &[]).0.is_ok());
+        assert_eq!(f.upds.len(), 3);
+        for u in &f.upds {
+            assert_eq!(u.waveform_mode, WAVEFORM_MODE_GC16);
+            assert_eq!(u.update_mode, UPDATE_MODE_FULL);
+            assert_eq!(u.hist_bw_waveform_mode, 0);
+            assert_eq!(u.hist_gray_waveform_mode, 0);
+            assert_eq!(u.temp, 0);
+            assert_eq!(u.flags, 0);
+            let r = u.update_region;
+            assert_eq!((r.top, r.left, r.width, r.height), (0, 0, G.w as u32, G.h as u32));
+        }
+    }
+
+    #[test]
+    fn marker_payload_is_the_8_byte_kernel_struct() {
+        assert_eq!(core::mem::size_of::<MxcfbUpdateMarkerData>(), 8);
+        assert_eq!(MXCFB_WAIT_FOR_UPDATE_COMPLETE, 0xC008_462F);
+        // _IOC size field (bits 16..29) must agree with the struct.
+        assert_eq!((MXCFB_WAIT_FOR_UPDATE_COMPLETE >> 16) & 0x3FFF, 8);
+        assert_eq!((MXCFB_SEND_UPDATE >> 16) & 0x3FFF, 72);
+    }
+
+    #[test]
+    fn progress_is_logged_before_each_ioctl() {
+        let mut f = Fake { fail_send: Some(0), ..Default::default() };
+        let (r, log, _) = run(&mut f, true, &[]);
+        assert!(r.is_err());
+        // The send failed, yet its line is already in the log.
+        assert!(log.contains("pass=black marker=2 SEND_UPDATE"), "{}", log);
+        assert!(!log.contains("WAIT"), "{}", log);
+        // Progress never carries the "screen:" prefix, which marks errors only.
+        assert!(!log.contains("screen:"), "{}", log);
+    }
+
+    // ---- errors ----------------------------------------------------------
+
+    #[test]
+    fn send_failure_stops_the_sequence() {
+        let mut f = Fake { fail_send: Some(1), ..Default::default() };
+        let (r, _, _) = run(&mut f, true, &[]);
+        let e = r.unwrap_err();
+        assert!(e.starts_with("SEND_UPDATE (white)"), "{}", e);
+        assert_eq!(f.sends, 2);
+        assert_eq!(f.waits, 1); // black waited; white never waited; no text
+    }
+
+    #[test]
+    fn wait_failure_stops_the_sequence() {
+        let mut f = Fake { fail_wait: Some(0), ..Default::default() };
+        let (r, _, _) = run(&mut f, true, &[]);
+        let e = r.unwrap_err();
+        assert!(e.starts_with("WAIT (black)"), "{}", e);
+        assert_eq!((f.sends, f.waits), (1, 1));
+    }
+
+    #[test]
+    fn plain_run_reports_failure_too() {
+        let mut f = Fake { fail_wait: Some(0), ..Default::default() };
+        assert!(run(&mut f, false, &[]).0.is_err());
     }
 }
