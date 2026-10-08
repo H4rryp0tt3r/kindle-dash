@@ -11,6 +11,10 @@ immutable, so a tag per release is an alias with nothing to add.
 
 ## [Unreleased]
 
+<!-- CHANGELOG-PLACEHOLDER -->
+
+## [0.4.0] — 2026-10-08
+
 ### Added
 
 - Test candidate panel userspace over USB SSH in a disposable chroot, without
