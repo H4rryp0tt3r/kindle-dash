@@ -11,7 +11,17 @@ immutable, so a tag per release is an alias with nothing to add.
 
 ## [Unreleased]
 
-<!-- CHANGELOG-PLACEHOLDER -->
+### Fixed
+
+- Set the raw frontlight brightness to 50 during stage 1, after sysfs mounts,
+  with an info log and no readback or validation.
+- Add black/white clearing passes before the first dashboard frame and after
+  eight ordinary changed frames to reduce old-text residue. Keep conservative
+  full-screen GC16 parameters; visual ghosting improvement needs device validation.
+- Batch subsequent log/status bursts for 200 ms without postponing the deadline
+  under continuous output. Keep initial output immediate and idle refresh-free.
+- Propagate panel submission/completion failures instead of exiting successfully;
+  park the panel owner on failure and stream update diagnostics before ioctls.
 
 ## [0.4.0] — 2026-10-08
 

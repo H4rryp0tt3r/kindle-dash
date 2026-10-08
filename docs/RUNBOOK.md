@@ -21,19 +21,29 @@ built from, never a literal written by hand.
 | | |
 |---|---|
 | init | `runit` as PID 1 (`/sbin/runit`) |
-| stage 1 | `/etc/runit/1` — mounts, panel power policy, then exits |
+| stage 1 | `/etc/runit/1` — mounts, frontlight 50, panel power policy, then exits |
 | stage 2 | `/etc/runit/2` — busybox `runsvdir /service`, must not return |
 | stage 3 | `/etc/runit/3` — sync + unmount |
 | service | `10-dash` — streams current-boot logs and USB/SSH status |
-| renderer | `bin/screen` — 8x8 font, scale 2, one conservative GC16 update |
+| renderer | `bin/screen` — 8x8 font, scale 2, conservative GC16 updates |
 | USB network | `20-usbnet` — stock gadget stack, static USB address |
 | maintenance SSH | `30-sshd` — key-only Dropbear; disabled until provisioned |
 | rootfs | 64 MiB ext3, label `dash-root`, no shared libc or loader |
 
 USB setup: [`USB-SSH.md`](USB-SSH.md). Hardware untested.
 EPDC built in. Stage 1 keeps power on (`-1` to `mxc_epdc_pwrdown`). No raw writes.
-`10-dash` alone paints. New output → refresh. Busy → combine lines. Idle → block.
-One conservative GC16 update per frame. Flashes expected. Paint-once rule gone.
+Stage 1 writes raw frontlight brightness **50** once after sysfs mounts, with an
+info log and no readback or validation. This is not 50 percent and does not
+control light during bootloader/kernel startup.
+
+`10-dash` alone paints. The first frame is immediate; later dirty bursts get a
+fixed 200 ms batching window. Busy → combine lines. Idle → block.
+The first frame and the next changed frame after eight ordinary updates use
+`screen --clean`: full-screen black → white → text, waiting after each pass.
+Every pass remains GC16/FULL with `hist_bw=hist_gray=temp=0`. Extra flashes and
+latency are expected; the clearing cadence is provisional pending visual tests.
+No clearing happens while idle. Submission/completion failure parks the owner
+instead of creating a retry/flash loop. Paint-once rule gone.
 
 ## Build
 
