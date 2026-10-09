@@ -35,6 +35,9 @@ log() {
 
 log "start, mounts up (proc sys dev, tmpfs on /var/run)"
 
+# Raw frontlight level, applied once after the kernel has exposed sysfs.
+echo 50 > /sys/class/backlight/max77696-bl/brightness && log "frontlight brightness set to 50"
+
 # devtmpfs hides authored /dev entries, so create the PTY mount point now.
 log "mounting devpts for SSH terminals"
 if mkdir -p /dev/pts && mount -t devpts -o mode=0620,gid=0 devpts /dev/pts; then

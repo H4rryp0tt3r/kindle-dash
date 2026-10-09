@@ -32,6 +32,9 @@ built from, never a literal written by hand.
 
 USB setup: [`USB-SSH.md`](USB-SSH.md). Hardware untested.
 EPDC built in. Stage 1 keeps power on (`-1` to `mxc_epdc_pwrdown`). No raw writes.
+Stage 1 sets raw frontlight brightness **50** after sysfs mounts, with an info
+log and no readback or validation. This is not 50 percent and does not control
+light during bootloader/kernel startup.
 `10-dash` alone paints. New output → refresh. Busy → combine lines. Idle → block.
 One conservative GC16 update per frame. Flashes expected. Paint-once rule gone.
 
