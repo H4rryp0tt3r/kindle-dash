@@ -11,6 +11,10 @@ immutable, so a tag per release is an alias with nothing to add.
 
 ## [Unreleased]
 
+<!-- CHANGELOG-PLACEHOLDER -->
+
+## [0.5.0] — 2026-10-09
+
 ### Fixed
 
 - Set raw frontlight brightness to 50 during boot stage 1, after sysfs mounts,
