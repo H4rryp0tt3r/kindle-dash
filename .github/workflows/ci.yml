@@ -2,7 +2,7 @@
 #
 # Three required checks, deliberately separate so a failure names itself:
 #   changelog  the Unreleased section has been filled in
-#   test       rustc --test unit tests
+#   test       Rust/Cargo unit tests and mocked services
 #   build      a real rootfs, plus its content fingerprint
 #
 # `build` needs the private pins repo, so it needs DASH_PINS_TOKEN. GitHub does
@@ -92,7 +92,15 @@ jobs:
           fi
       - name: run the unit tests
         if: steps.gate.outputs.found == 'true'
-        run: make test
+        env:
+          DASH_PINS_TOKEN: ${{ secrets.DASH_PINS_TOKEN }}
+        run: |
+          if [ -z "${DASH_PINS_TOKEN:-}" ]; then
+            echo "::error::DASH_PINS_TOKEN is required for the pinned offline Cargo sources. Fork PRs must be brought into this repository."
+            exit 1
+          fi
+          make test
+          python3 tests/dev-chroot.py
 
   build:
     name: build

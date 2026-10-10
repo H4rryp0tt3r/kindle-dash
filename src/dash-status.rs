@@ -2,9 +2,13 @@
  * dash-status -- the single panel owner: a current-boot streaming console.
  * Watch logs/status with inotify, block while idle, and compose one conservative
  * screen update per frame. Output arriving during refresh is coalesced, not lost
- * in an unbounded repaint queue. No crates or framebuffer ABI changes.
+ * in an unbounded repaint queue. evdev touch shares this single panel owner.
  */
-use std::ffi::{c_char, c_int};
+#[path = "input/tap.rs"]
+mod tap;
+#[path = "input/touch.rs"]
+mod touch;
+use libc::{c_int, inotify_add_watch, inotify_init1, poll, pollfd as PollFd};
 #[cfg(test)]
 use std::fs::OpenOptions;
 use std::fs::{self, File};
@@ -23,18 +27,6 @@ const WIDTH: usize = 43; // renderer allows 47; leave two-space margins
 const LOG_ROWS: usize = 20;
 const WATCHDOG: Duration = Duration::from_secs(20);
 const MASK: u32 = 0x0000_0002 | 0x0000_0008 | 0x0000_0080 | 0x0000_0100; // modify/close-write/move-to/create
-
-#[repr(C)]
-struct PollFd {
-    fd: c_int,
-    events: i16,
-    revents: i16,
-}
-extern "C" {
-    fn inotify_init1(flags: c_int) -> c_int;
-    fn inotify_add_watch(fd: c_int, path: *const c_char, mask: u32) -> c_int;
-    fn poll(fds: *mut PollFd, count: usize, timeout: c_int) -> c_int;
-}
 
 #[derive(Clone, Debug, PartialEq)]
 struct Status {
@@ -153,6 +145,7 @@ fn frame(
     ssh: &Status,
     expired: bool,
     logs: &[String],
+    touch: &touch::View,
 ) -> String {
     let mut out = vec![
         "Hello World!".to_string(),
@@ -163,6 +156,7 @@ fn frame(
     ];
     out.extend(wrap(&usb.line("USB", expired)));
     out.extend(wrap(&ssh.line("SSH", expired)));
+    for line in touch.lines() { out.extend(wrap(&line)); }
     out.push("Kindle: 192.168.15.244".into());
     out.push("Mac: 192.168.15.201/24".into());
     out.push("Log available in diagnostics".into());
@@ -193,6 +187,15 @@ fn wait(fd: c_int, timeout: c_int) -> io::Result<()> {
         }
     }
     Ok(())
+}
+fn wait_inputs(log_fd: c_int, touch_fd: c_int, timeout: c_int) -> io::Result<bool> {
+    let mut fds = [PollFd { fd: log_fd, events: libc::POLLIN, revents: 0 },
+        PollFd { fd: touch_fd, events: libc::POLLIN, revents: 0 }];
+    if unsafe { poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout) } < 0 {
+        let e = io::Error::last_os_error();
+        if e.kind() != io::ErrorKind::Interrupted { return Err(e); }
+    }
+    Ok(fds[1].revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0)
 }
 struct Watcher(File);
 impl Watcher {
@@ -278,16 +281,65 @@ fn monitor(
     kernel: &str,
     watchdog: Duration,
 ) -> io::Result<()> {
+    monitor_input(log, run, screen, release, kernel, watchdog, Path::new("/dev/input"))
+}
+fn monitor_input(
+    log: &Path, run: &Path, screen: &Path, release: &str, kernel: &str,
+    watchdog: Duration, input: &Path,
+) -> io::Result<()> {
     let mut watch = Watcher::new(log.parent().unwrap(), run)?;
     let deadline = Instant::now() + watchdog;
+    let touch_deadline = deadline + Duration::from_secs(10);
     let mut previous = String::new();
     let mut last_logs = Vec::new();
     let mut usb = Status::pending();
     let mut ssh = Status::pending();
     let mut last_expired = false;
     let mut first = true;
+    let mut touch_device = None;
+    let mut touch_view = touch::View::starting();
+    let mut last_touch = touch_view.clone();
+    let mut input_failed = false;
+    let mut next_discovery = Instant::now();
     loop {
         watch.drain()?;
+        let setup = read_status(&run.join("dash-touch.status"));
+        if setup.terminal() && setup.state != "ready" && !input_failed {
+            touch_device = None;
+            input_failed = true;
+            touch_view.state = format!("{}: {}", setup.state, setup.detail);
+        }
+        if touch_device.is_none() && !input_failed && Instant::now() >= next_discovery {
+            next_discovery = Instant::now() + Duration::from_secs(1);
+            match touch::Touch::discover(input) {
+                Ok(Some(device)) => {
+                    touch_device = Some(device);
+                    touch_view.state = "lift all fingers once".into();
+                }
+                Ok(None) => {
+                    let setup = read_status(&run.join("dash-touch.status"));
+                    touch_view.state = if setup.terminal() {
+                        if setup.state == "ready" { "unavailable: no event device".into() }
+                        else { format!("{}: {}", setup.state, setup.detail) }
+                    } else if Instant::now() >= touch_deadline { "unavailable: no event device".into() }
+                    else { "waiting for device".into() };
+                    if setup.terminal() || Instant::now() >= touch_deadline { input_failed = true; }
+                }
+                Err(error) => {
+                    eprintln!("10-dash: touch unavailable: {error}");
+                    touch_view.state = format!("FAILED: {error}");
+                    input_failed = true;
+                }
+            }
+        }
+        if let Some(device) = touch_device.as_mut() {
+            if let Err(error) = device.drain(&mut touch_view) {
+                eprintln!("10-dash: touch failed: {error}");
+                touch_view.state = format!("FAILED: {error}");
+                touch_device = None;
+                input_failed = true;
+            }
+        }
         let logs = log_tail(log).unwrap_or_default();
         let u = read_status(&run.join("dash-usbnet.status"));
         let s = read_status(&run.join("dash-sshd.status"));
@@ -295,10 +347,11 @@ fn monitor(
         let show_timeout = expired && (!u.terminal() || !s.terminal());
         // Intermediate stages are still shown with streamed log lines, but the
         // clock alone never makes the screen repaint continuously.
-        if first || logs != last_logs || u != usb || s != ssh || show_timeout != last_expired {
+        if first || logs != last_logs || u != usb || s != ssh || show_timeout != last_expired
+            || touch_view != last_touch {
             let uptime = fs::read_to_string("/proc/uptime").unwrap_or_default();
             let uptime = uptime.split('.').next().unwrap_or("?");
-            let next = frame(release, kernel, uptime, &u, &s, expired, &logs);
+            let next = frame(release, kernel, uptime, &u, &s, expired, &logs, &touch_view);
             if next != previous {
                 fs::write(run.join("dash.frame"), &next)?;
                 let output = Command::new(screen).arg(run.join("dash.frame")).output()?;
@@ -315,6 +368,7 @@ fn monitor(
             usb = u;
             ssh = s;
             last_expired = show_timeout;
+            last_touch = touch_view.clone();
         }
         let timeout = if !expired {
             deadline
@@ -324,7 +378,16 @@ fn monitor(
         } else {
             -1
         };
-        wait(watch.0.as_raw_fd(), timeout)?;
+        let timeout = if touch_device.is_none() && !input_failed {
+            let retry = next_discovery.saturating_duration_since(Instant::now()).as_millis()
+                .min(i32::MAX as u128) as i32;
+            if timeout < 0 { retry } else { timeout.min(retry) }
+        } else { timeout };
+        if wait_inputs(watch.0.as_raw_fd(), touch_device.as_ref().map_or(-1, |d| d.fd()), timeout)? {
+            touch_device = None;
+            input_failed = true;
+            touch_view.state = "FAILED: input disconnected".into();
+        }
     }
 }
 fn main() {
@@ -414,12 +477,25 @@ mod tests {
             &Status::pending(),
             false,
             &logs,
+            &touch::View::starting(),
         );
         assert!(f.contains("Hello World!"));
         assert!(f.contains("log 99"));
         assert!(!f.contains("log 0\n"));
         assert!(f.lines().count() <= 40);
         assert!(f.lines().all(|l| l.len() <= 45));
+    }
+    #[test]
+    fn touch_diagnostics_are_visible_and_bounded() {
+        let mut touch = touch::View::starting();
+        touch.state = "ready".into();
+        touch.taps = 3;
+        touch.last = Some((356, 764));
+        let f = frame("test", "3.0.35-lab126", "1", &Status::pending(),
+            &Status::pending(), false, &[], &touch);
+        assert!(f.contains("Taps: 3"));
+        assert!(f.contains("x=356 y=764"));
+        assert!(f.lines().count() <= 40);
     }
     #[test]
     fn listener_requires_exact_usb_address_port_state() {
@@ -460,13 +536,14 @@ mod tests {
         let run = p.join("run");
         let screen2 = screen.clone();
         let handle = std::thread::spawn(move || {
-            monitor(
+            monitor_input(
                 &log2,
                 &run,
                 &screen2,
                 "test",
                 "kernel",
                 Duration::from_millis(100),
+                Path::new("/definitely-missing-dash-input"),
             )
         });
         let wait_for = |count: usize| {

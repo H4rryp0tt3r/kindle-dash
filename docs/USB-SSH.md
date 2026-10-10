@@ -67,11 +67,13 @@ The private key stays in the agent. Host-key verification remains enabled.
 
 The helper extracts the canonical image, streams a compressed tree over SSH,
 checks its hash, and chroots into a private `/tmp/dash-chroot.*` directory.
-Only `/proc`, `/dev/fb0` and `/dev/null` are exposed. Candidate logs/runtime
-files are separate; USB/SSH status is a snapshot. No credentials are copied.
+Only `/proc`, `/dev/fb0`, `/dev/null` and `/dev/input` (when present) are exposed.
+Candidate logs/runtime files are separate; USB/SSH/touch setup status is a snapshot.
+No credentials are copied. Touch modules must already be loaded in the host kernel;
+the candidate never loads/reloads them. See [touch diagnostics](TOUCH.md).
 
 It stops installed `10-dash`, waits for the old renderer, runs the candidate
-panel for ten seconds, prints its frame/log, restores installed `10-dash`, and
+panel for sixty seconds, prints its frame/log, restores installed `10-dash`, and
 removes the candidate mounts/tree. Watch the panel for visual correctness.
 USB and SSH services are not restarted. A dirty source checkout is labelled.
 

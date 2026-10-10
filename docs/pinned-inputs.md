@@ -46,6 +46,17 @@ firmware which is already gzip and committed as-is.
 - Build checks: static ARM, module vermagic, FPU. Hardware still untested.
 - Device keys/seeds not release inputs. Setup: [`USB-SSH.md`](USB-SSH.md).
 
+## Touch inputs
+
+- `third-party/touch/`: only stock `cyttsp4_i2c`, `cyttsp4_core`, `cyttsp4_mt_b`;
+  SHA256SUMS over raw modules, gz twins in pins. Vermagic `3.0.35-lab126`.
+- Sequence proven on PW2 PINOT_WFO board027. Core recovery mode off, no force load.
+- No `cyttsp4_loader`, debug/device_access modules, or controller firmware updates.
+  `40-touch` verifies fixed hashes and real driver bindings before readiness.
+- Module registration and actual single/multi-finger contacts are hardware-tested.
+  Fresh-boot startup and integrated panel feedback have separate validation gates.
+  Details: [`TOUCH.md`](TOUCH.md).
+
 ## `base-kernel/` — pinned main-slot kernel
 
 The one artifact Dash cannot rebuild (the Amazon GPL source is not here). Treat
@@ -152,10 +163,14 @@ on, so `BUILD-IMAGE.lock` records the image id and its registry digest, `make
 env` refuses to build against anything else, and `make env-bump` (rebuild,
 republish, re-pin) is the only supported way to change it.
 
-There is no `Cargo.lock` and no vendored crate, because `src/` has **no external
-dependencies** -- `screen.rs` declares `open`/`close`/`mmap`/`munmap`/`ioctl`
-itself. That is deliberate: it keeps `make build` offline and removes the one
-thing that could make identical inputs produce a different binary.
+`dash-status` uses Cargo with evdev/libc and standard syscall bindings. The root
+`Cargo.lock` pins the graph; `third-party/rust-deps/vendor.tar.gz` in the private
+pins repo supplies unmodified crate sources and upstream licenses. SHA256SUMS
+hashes the archive itself; Cargo checks per-crate registry checksums against the
+lockfile. Build/test verify before extraction and use `--locked --offline` with
+container networking disabled. Other standalone binaries still use direct rustc.
+Dependency updates are reviewed input changes, not fresh resolution during a build.
+Static ARM, old-kernel and FPU compatibility still require artifact/device checks.
 
 `arm-unknown-linux-gnueabi` is soft-float, the only float ABI this CPU has
 (golden rule 14), and `build.sh check-float` proves it on every build rather

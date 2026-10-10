@@ -11,7 +11,21 @@ immutable, so a tag per release is an alias with nothing to add.
 
 ## [Unreleased]
 
-<!-- CHANGELOG-PLACEHOLDER -->
+### Added
+
+- PW2 tap diagnostics: independently initialize pinned stock Cypress drivers,
+  read Type-B contacts through evdev, and show touch status, tap/rejection counts
+  and raw coordinates through the single panel owner. Reject holds, drags and
+  multi-finger interactions; cancel lost streams without guessing finger state.
+- Test touch in the disposable chroot with input access and a 60-second window.
+  Cover observed device traces, report recovery, missing/disconnected input,
+  bounded setup and cleanup; preserve installed USB/SSH and device identity.
+
+### Changed
+
+- Allow external Rust crates and standard syscall bindings. Production dependency
+  sources must remain pinned, verified and available offline; static ARM/FPU and
+  old-kernel compatibility checks remain mandatory.
 
 ## [0.5.0] — 2026-10-09
 

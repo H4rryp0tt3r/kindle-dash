@@ -36,6 +36,17 @@ MAIN_KERNEL=main-uImage
 DIAG_KERNEL=diag-uImage
 ROOTFS=dash-rootfs.img
 
+# Binaries built by Cargo from the root Cargo.toml (they use vendored crates);
+# every other top-level src/*.rs is still one direct rustc invocation.
+CARGO_BINS="dash-status"
+# Vendored crate sources: a private source archive, hashed as archive bytes.
+RUST_DEPS=$HERE/third-party/rust-deps
+# Stock touchscreen modules shipped in /lib/modules/3.0.35-lab126. The loader
+# can rewrite controller firmware and device_access/debug expose raw controller
+# commands, so those three must never reach the rootfs.
+TOUCH_MODULES="cyttsp4_core cyttsp4_i2c cyttsp4_mt_b"
+TOUCH_FORBIDDEN="cyttsp4_loader cyttsp4_device_access cyttsp4_debug"
+
 # The single build image. `make` exports DASH_BUILD_IMAGE; fall back to the same
 # tag the Makefile derives, so direct invocation also works.
 if [ -z "${DASH_BUILD_IMAGE:-}" ]; then
@@ -73,8 +84,53 @@ Dash OS build tool.
 EOF
 }
 
+# ============================================================== cargo inputs
+# The source tree a container needs for both rustc and Cargo, as one tar stream:
+# the root Cargo.toml + Cargo.lock, src/, tests/ (Cargo integration tests and
+# fixtures; never staged into the rootfs) and the pinned vendor archive with its
+# SHA256SUMS. Container-side layout is fixed (/s/...), so nothing host-specific
+# reaches the compiler.
+cargo_sources_tar() {
+	local ROOT=$1
+	local f
+	for f in "$ROOT/Cargo.toml" "$ROOT/Cargo.lock" \
+		"$RUST_DEPS/vendor.tar.gz" "$RUST_DEPS/SHA256SUMS"; do
+		[ -f "$f" ] || { echo "missing Cargo input: $f (run: make pins)" >&2; return 1; }
+	done
+	COPYFILE_DISABLE=1 tar -cf - --no-xattrs \
+		-C "$ROOT" Cargo.toml Cargo.lock src tests \
+		-C "$HERE" third-party/rust-deps/vendor.tar.gz third-party/rust-deps/SHA256SUMS
+}
+
+# Container-side prologue: check the vendor archive BEFORE extracting it, refuse
+# any member outside vendor/, then point Cargo at it with the network off. The
+# containers also run with --network none, so a missing crate is an error rather
+# than a download.
+cargo_prelude() {
+	cat <<'EOF'
+( cd /s/third-party/rust-deps && sha256sum -c --strict --quiet SHA256SUMS ) \
+	|| { echo "FAIL: vendor.tar.gz does not match its SHA256SUMS" >&2; exit 1; }
+tar -tzf /s/third-party/rust-deps/vendor.tar.gz > /tmp/vendor-members
+if grep -v -e "^vendor/" -e "^vendor$" /tmp/vendor-members > /tmp/vendor-invalid; then
+	echo "FAIL: vendor.tar.gz has members outside vendor/" >&2; exit 1
+fi
+if grep -Eq "(^|/)\\.\\.(/|$)" /tmp/vendor-members; then
+	echo "FAIL: vendor.tar.gz has parent-directory members" >&2; exit 1
+fi
+tar -C /s -xzf /s/third-party/rust-deps/vendor.tar.gz --no-same-owner
+export CARGO_HOME=/s/cargo-home CARGO_TARGET_DIR=/s/target CARGO_NET_OFFLINE=true
+mkdir -p "$CARGO_HOME"
+printf "%s\n" "[source.crates-io]" "replace-with = \"dash-vendor\"" \
+	"[source.dash-vendor]" "directory = \"/s/vendor\"" \
+	"[net]" "offline = true" > "$CARGO_HOME/config.toml"
+cargo --version >&2
+EOF
+}
+
 # ============================================================== userland
 # Cross-compile every *.rs in <srcdir> into a static ARM binary in <outdir>.
+# CARGO_BINS are skipped there and built instead by Cargo from <srcdir>/../
+# Cargo.toml, offline, against the vendored crates.
 # Static is not optional: the rootfs has no libc and no dynamic loader.
 cmd_userland() {
 	local SRC=${1:?usage: build.sh userland <srcdir> <outdir>}
@@ -99,25 +155,63 @@ cmd_userland() {
 	# build image changes; content is what rebuild-check proves.
 	export DASH_RUSTFLAGS=${DASH_RUSTFLAGS:--O --edition 2021 --target arm-unknown-linux-gnueabi -C linker=arm-linux-gnueabi-gcc -C target-feature=+crt-static -C panic=abort -C codegen-units=1 -C strip=symbols}
 
-	local RFILE RSRC
+	# Cargo-built binaries take the same static soft-float settings; the rest of
+	# the release profile (opt-level, codegen-units=1, panic=abort, strip) is
+	# Cargo.toml's. The remap keeps the container's vendor path out of panic
+	# location strings.
+	export DASH_CARGO_RUSTFLAGS=${DASH_CARGO_RUSTFLAGS:--C target-feature=+crt-static --remap-path-prefix=/s/vendor=vendor --remap-path-prefix=/s=.}
+
+	# Cargo needs the package root: <srcdir> must be <root>/src.
+	[ "$(basename "$SRC")" = src ] || { echo "userland: <srcdir> must be a src/ directory" >&2; exit 1; }
+	local ROOT; ROOT=$(dirname "$SRC")
+
+	local RFILE RSRC r b
 	RFILE=$(cd "$SRC" && ls *.rs 2>/dev/null)
 	RSRC=$(printf '%s\n' "$RFILE" | grep -c . || true)
 	[ "$RSRC" -gt 0 ] || { echo "no .rs files in $SRC" >&2; exit 1; }
+	for b in $CARGO_BINS; do
+		[ -f "$SRC/$b.rs" ] || { echo "Cargo binary source missing: $SRC/$b.rs" >&2; exit 1; }
+	done
 
-	echo "=== userland: $RSRC source file(s) -> $OUT ==="
+	echo "=== userland: $RSRC source file(s) -> $OUT (Cargo: $CARGO_BINS) ==="
 
-	COPYFILE_DISABLE=1 tar -C "$SRC" -cf - --no-xattrs . \
-	| podman run -i --rm --pull never "$DASH_BUILD_IMAGE" bash -c '
+	cargo_sources_tar "$ROOT" \
+	| podman run -i --rm --pull never --network none "$DASH_BUILD_IMAGE" bash -c '
 set -euo pipefail
 RF='"$(printf '%q' "$DASH_RUSTFLAGS")"'
-mkdir -p /s/src /out
-COPYFILE_DISABLE=1 tar -C /s/src -xf -
+CRF='"$(printf '%q' "$DASH_CARGO_RUSTFLAGS")"'
+CB='"$(printf '%q' "$CARGO_BINS")"'
+mkdir -p /s /out
+COPYFILE_DISABLE=1 tar -C /s -xf -
 export PATH=/usr/bin:/usr/local/bin:$PATH
 rustc --version >&2
 for r in /s/src/*.rs; do
 	b=$(basename "$r" .rs)
+	case " $CB " in *" $b "*) continue;; esac
 	rustc $RF -o "/out/$b" "$r"
 	echo "built $b" >&2
+done
+'"$(cargo_prelude)"'
+cd /s
+CARGO_TARGET_ARM_UNKNOWN_LINUX_GNUEABI_LINKER=arm-linux-gnueabi-gcc \
+CARGO_TARGET_ARM_UNKNOWN_LINUX_GNUEABI_RUSTFLAGS="$CRF" \
+	cargo build --release --locked --offline --target arm-unknown-linux-gnueabi --bins >&2
+for b in $CB; do
+	cp "/s/target/arm-unknown-linux-gnueabi/release/$b" "/out/$b"
+	echo "built $b (cargo)" >&2
+done
+# Every output must be a static ELF32 ARM soft-float executable: the rootfs has
+# no dynamic loader and this CPU has no hard-float ABI.
+for f in /out/*; do
+	arm-linux-gnueabi-readelf -h "$f" > /tmp/elf-header
+	grep -q "Class:.*ELF32" /tmp/elf-header && grep -q "Machine:.*ARM" /tmp/elf-header \
+		&& grep -q "soft-float ABI" /tmp/elf-header \
+		|| { echo "FAIL: not ELF32 ARM soft-float: $f" >&2; exit 1; }
+	arm-linux-gnueabi-readelf -l "$f" > /tmp/elf-programs
+	arm-linux-gnueabi-readelf -d "$f" > /tmp/elf-dynamic
+	if grep -q INTERP /tmp/elf-programs || grep -q NEEDED /tmp/elf-dynamic; then
+		echo "FAIL: dynamic executable: $f" >&2; exit 1
+	fi
 done
 # The container is throwaway, so the binaries travel back over stdout.
 COPYFILE_DISABLE=1 tar -C /out -cf - .
@@ -130,7 +224,6 @@ COPYFILE_DISABLE=1 tar -C /out -cf - .
 	grep -q "^built " "$OUT/build-userland.log" || {
 		echo "userland build produced no output" >&2; exit 1; }
 
-	local r b
 	for r in $RFILE; do
 		b=${r%.rs}
 		[ -s "$OUT/$b" ] || { echo "MISSING output for $r" >&2; exit 1; }
@@ -177,9 +270,15 @@ cmd_rootfs() {
 
 	echo "=== rootfs: $STAGE -> $IMG (${SIZE_MB} MiB ext3) ==="
 
+	[ -f "$HERE/third-party/touch/SHA256SUMS" ] || {
+		echo "missing $HERE/third-party/touch/SHA256SUMS (run: make pins)" >&2; exit 1; }
+
 	COPYFILE_DISABLE=1 tar -C "$STAGE" -cf - --no-xattrs . \
 	| podman run -i --rm --pull never "$DASH_BUILD_IMAGE" bash -c '
 set -euo pipefail
+TOUCH_MODULES='"$(printf '%q' "$TOUCH_MODULES")"'
+TOUCH_FORBIDDEN='"$(printf '%q' "$TOUCH_FORBIDDEN")"'
+TOUCH_SUMS='"$(printf '%q' "$(cat "$HERE/third-party/touch/SHA256SUMS")")"'
 mkdir -p /s/rootfs /out
 COPYFILE_DISABLE=1 tar -C /s/rootfs -xf -
 chown -R 0:0 /s/rootfs
@@ -254,6 +353,22 @@ for module in fsl_otg_arc arcotg_udc g_ether; do
     [ -s "$f" ] || { echo "FAIL: missing module $module" >&2; fail=1; continue; }
     arm-linux-gnueabi-readelf -p .modinfo "$f" | grep -q "vermagic=3.0.35-lab126 " || { echo "FAIL: module vermagic $module" >&2; fail=1; }
 done
+# Touch modules: exactly the pinned bytes, flat in the module directory.
+printf "%s\n" "$TOUCH_SUMS" > /tmp/touch-sums
+for module in $TOUCH_MODULES; do
+    f=/s/verify/lib/modules/3.0.35-lab126/$module.ko
+    [ -s "$f" ] || { echo "FAIL: missing touch module $module" >&2; fail=1; continue; }
+    [ "$(stat -c %a "$f")" = 644 ] || { echo "FAIL: touch module mode $module" >&2; fail=1; }
+    arm-linux-gnueabi-readelf -p .modinfo "$f" | grep -q "vermagic=3.0.35-lab126 " || { echo "FAIL: module vermagic $module" >&2; fail=1; }
+    want=$(awk -v n="$module.ko" "\$2 == n { print \$1 }" /tmp/touch-sums)
+    got=$(sha256sum "$f" | cut -d" " -f1)
+    [ -n "$want" ] && [ "$got" = "$want" ] || { echo "FAIL: touch module hash $module" >&2; fail=1; }
+done
+for bad in $TOUCH_FORBIDDEN; do
+    if find /s/verify -name "$bad*" | grep -q .; then
+        echo "FAIL: $bad present in image (firmware loader / raw controller access)" >&2; fail=1
+    fi
+done
 # Check the bytes extracted from the artifact, not just the staging executables.
 for f in bin/screen bin/dash-status bin/usb-supervise bin/ssh-seed bin/dropbearkey sbin/dropbear; do
     arm-linux-gnueabi-readelf -h "/s/verify/$f" > /tmp/elf-header
@@ -313,17 +428,21 @@ cmd_test() {
 	command -v podman >/dev/null || { echo "podman required" >&2; exit 1; }
 	mkdir -p "$HERE/build"
 
-	echo "=== test: $SRC/*.rs ==="
-	COPYFILE_DISABLE=1 tar -C "$SRC" -cf - --no-xattrs . \
-	| podman run -i --rm --pull never "$DASH_BUILD_IMAGE" bash -c '
+	[ "$(basename "$SRC")" = src ] || { echo "test: <srcdir> must be a src/ directory" >&2; exit 1; }
+
+	echo "=== test: $SRC/*.rs + Cargo ($CARGO_BINS) ==="
+	cargo_sources_tar "$(dirname "$SRC")" \
+	| podman run -i --rm --pull never --network none "$DASH_BUILD_IMAGE" bash -c '
 set -euo pipefail
-mkdir -p /s/src /out
-COPYFILE_DISABLE=1 tar -C /s/src -xf -
+CB='"$(printf '%q' "$CARGO_BINS")"'
+mkdir -p /s /out
+COPYFILE_DISABLE=1 tar -C /s -xf -
 export PATH=/usr/bin:/usr/local/bin:$PATH
 rustc --version >&2
 n=0
 for r in /s/src/*.rs; do
 	b=$(basename "$r" .rs)
+	case " $CB " in *" $b "*) echo "--- $b (Cargo; tested below)" >&2; continue;; esac
 	if grep -q "^#\[cfg(test)\]" "$r"; then
 		echo "--- $b" >&2
 		rustc --test -O --edition 2021 -o "/out/$b.test" "$r"
@@ -333,6 +452,13 @@ for r in /s/src/*.rs; do
 		echo "--- $b (no #[cfg(test)] module; nothing to run)" >&2
 	fi
 done
+'"$(cargo_prelude)"'
+# Host target: unit tests of the Cargo binaries (and the modules they include)
+# plus the integration tests under tests/.
+echo "--- cargo test" >&2
+cd /s
+cargo test --locked --offline -- --test-threads=1
+n=$((n + 1))
 [ "$n" -gt 0 ] || { echo "no test module found in any source file" >&2; exit 1; }
 echo "TEST_OK $n module(s)" >&2
 ' 2>&1 | tee "$HERE/build/test.log" | grep -E '^(test |---|running|test result|TEST_OK|error|warning)'
@@ -345,6 +471,7 @@ set -euo pipefail
 mkdir -p /s && tar -C /s -xf -
 cd /s
 bash tests/runtime.sh
+if [ -f tests/touch-service.sh ]; then bash tests/touch-service.sh; fi
 '
 }
 
@@ -572,7 +699,10 @@ cmd_build() {
 	cmd_verify "$HERE/base-kernel" "$HERE/base-diag" \
 		"$HERE/third-party/busybox" "$HERE/third-party/runit" \
 		"$HERE/third-party/eink-firmware" "$HERE/recovery" \
-		"$HERE/third-party/dropbear" "$HERE/third-party/usbnet" >/dev/null
+		"$HERE/third-party/dropbear" "$HERE/third-party/usbnet" \
+		"$HERE/third-party/touch" "$HERE/third-party/rust-deps" >/dev/null
+	[ -f "$HERE/Cargo.toml" ] && [ -f "$HERE/Cargo.lock" ] || {
+		echo "missing $HERE/Cargo.toml or Cargo.lock" >&2; exit 1; }
 
 	say "stage rootfs tree"
 	rm -rf "$STAGE" "$USRLAND"
@@ -609,6 +739,11 @@ cmd_build() {
 	for module in fsl_otg_arc arcotg_udc g_ether; do
 		install -m 0644 "$HERE/third-party/usbnet/$module.ko" "$STAGE/lib/modules/3.0.35-lab126/$module.ko"
 	done
+	# Touch: only the three pinned modules, never the firmware loader or the raw
+	# access/debug modules (see TOUCH_FORBIDDEN).
+	for module in $TOUCH_MODULES; do
+		install -m 0644 "$HERE/third-party/touch/$module.ko" "$STAGE/lib/modules/3.0.35-lab126/$module.ko"
+	done
 
 	# Pinned third-party binaries.
 	install -m 0755 "$HERE/third-party/busybox/busybox" "$STAGE/bin/busybox"
@@ -624,6 +759,12 @@ cmd_build() {
 	for bad in runsvdir runsv sv; do
 		if [ -e "$STAGE/sbin/$bad" ]; then
 			echo "REFUSING to build: /sbin/$bad is the VFPv4 build that crashes on this CPU" >&2
+			exit 1
+		fi
+	done
+	for bad in $TOUCH_FORBIDDEN; do
+		if find "$STAGE" -name "$bad*" | grep -q .; then
+			echo "REFUSING to build: $bad staged (firmware loader / raw controller access)" >&2
 			exit 1
 		fi
 	done

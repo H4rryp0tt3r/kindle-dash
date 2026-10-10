@@ -48,6 +48,8 @@ class ChrootTests(unittest.TestCase):
                 base = Path(directory)
                 root = base / "candidate"
                 root.mkdir()
+                host_input = base / "host-input"
+                host_input.mkdir()
                 (root / ".dash-dev-candidate").touch()
                 for name in ("var/run", "var/log", "dev", "proc"):
                     (root / name).mkdir(parents=True, exist_ok=True)
@@ -100,6 +102,8 @@ esac
                 script = script.replace('tee -a /var/log/dash.log', f'tee -a {base / "host.log"}')
                 script = script.replace("/var/run/dash-chroot-lock", str(lock))
                 script = script.replace("/proc/mounts", str(mounts))
+                script = script.replace('[ -d /dev/input ]', f'[ -d {host_input} ]')
+                script = script.replace('mount -o bind /dev/input ', f'mount -o bind {host_input} ')
                 path = base / "runner.sh"
                 path.write_text(script)
                 env = dict(os.environ, CALLS=str(calls), STATE=str(state),
@@ -113,6 +117,9 @@ esac
                 self.assertEqual(lock.exists(), scenario in ("unmount-failure", "busy-lock"))
                 self.assertNotIn("20-usbnet", calls.read_text())
                 self.assertNotIn("30-sshd", calls.read_text())
+                if scenario == "success":
+                    self.assertIn(f"umount {root}/dev/input", calls.read_text())
+                    self.assertEqual(mounts.read_text(), "")
 
 
 if __name__ == "__main__":

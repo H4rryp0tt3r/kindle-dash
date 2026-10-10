@@ -52,7 +52,14 @@ RAW_INPUTS := \
 	$(HERE)/third-party/dropbear/dropbearkey \
 	$(HERE)/third-party/usbnet/fsl_otg_arc.ko \
 	$(HERE)/third-party/usbnet/arcotg_udc.ko \
-	$(HERE)/third-party/usbnet/g_ether.ko
+	$(HERE)/third-party/usbnet/g_ether.ko \
+	$(HERE)/third-party/touch/cyttsp4_core.ko \
+	$(HERE)/third-party/touch/cyttsp4_i2c.ko \
+	$(HERE)/third-party/touch/cyttsp4_mt_b.ko
+
+# Vendored crate sources for the Cargo-built binaries. Consumed as the archive
+# itself (its SHA256SUMS hashes archive bytes), so it is not in RAW_INPUTS.
+RUST_DEPS := $(HERE)/third-party/rust-deps/vendor.tar.gz
 
 .PHONY: help pins bootstrap env env-bump unpack build test verify fingerprint \
         rebuild-check shell clean current provision-ssh test-provision
@@ -192,10 +199,15 @@ build: pins unpack env
 	@$(HERE)/build.sh build
 
 # ---------------------------------------------------------------- test
-# rustc --test runs the renderer's own unit tests. No crates, no Cargo, no
-# extra packages in the build image.
-test: env
+# rustc --test runs the direct-rustc sources' unit tests; `cargo test` (offline,
+# vendored crates) runs the Cargo package's. The vendor archive arrives with the
+# pins, so fetch them only if it is absent -- `pins` replaces .pins wholesale.
+test: env $(RUST_DEPS)
+	@$(HERE)/build.sh verify $(HERE)/third-party/rust-deps >/dev/null
 	@$(HERE)/build.sh test "$(HERE)/src"
+
+$(RUST_DEPS):
+	@$(MAKE) --no-print-directory pins
 
 verify:
 	@echo "== pinned inputs"
@@ -203,7 +215,8 @@ verify:
 		$(HERE)/base-kernel $(HERE)/base-diag \
 		$(HERE)/third-party/busybox $(HERE)/third-party/runit \
 		$(HERE)/third-party/eink-firmware $(HERE)/recovery \
-		$(HERE)/third-party/dropbear $(HERE)/third-party/usbnet
+		$(HERE)/third-party/dropbear $(HERE)/third-party/usbnet \
+		$(HERE)/third-party/touch $(HERE)/third-party/rust-deps
 
 # Personalisation is separate: the canonical release image never contains keys.
 # PUBKEY must be an explicit OpenSSH Ed25519 public-key file, never a private key.

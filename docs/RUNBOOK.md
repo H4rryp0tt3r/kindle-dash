@@ -24,13 +24,16 @@ built from, never a literal written by hand.
 | stage 1 | `/etc/runit/1` — mounts, panel power policy, then exits |
 | stage 2 | `/etc/runit/2` — busybox `runsvdir /service`, must not return |
 | stage 3 | `/etc/runit/3` — sync + unmount |
-| service | `10-dash` — streams current-boot logs and USB/SSH status |
+| service | `10-dash` — streams logs, USB/SSH status and tap diagnostics |
 | renderer | `bin/screen` — 8x8 font, scale 2, one conservative GC16 update |
 | USB network | `20-usbnet` — stock gadget stack, static USB address |
 | maintenance SSH | `30-sshd` — key-only Dropbear; disabled until provisioned |
+| touch setup | `40-touch` — bounded stock Cypress setup; no firmware updates |
 | rootfs | 64 MiB ext3, label `dash-root`, no shared libc or loader |
 
-USB setup: [`USB-SSH.md`](USB-SSH.md). Hardware untested.
+USB setup: [`USB-SSH.md`](USB-SSH.md); Ethernet and key-only login are hardware-tested.
+Touch: [`TOUCH.md`](TOUCH.md); driver/console tests passed, integrated panel and
+fresh-boot initialization await device validation.
 EPDC built in. Stage 1 keeps power on (`-1` to `mxc_epdc_pwrdown`). No raw writes.
 Stage 1 sets raw frontlight brightness **50** after sysfs mounts, with an info
 log and no readback or validation. This is not 50 percent and does not control

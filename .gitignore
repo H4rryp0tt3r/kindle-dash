@@ -56,6 +56,9 @@
 # version; `make build` regenerates these from overlay/ + src/ + the pins.
 /build/
 /artifacts/
+/target/
+/third-party/touch/
+/third-party/rust-deps/
 
 # Python bytecode from the fastboot helper
 __pycache__/

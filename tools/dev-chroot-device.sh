@@ -13,6 +13,7 @@ child=
 mounted_proc=0
 mounted_fb=0
 mounted_null=0
+mounted_input=0
 say() {
 	printf '%ss  dev-chroot: %s\n' "$(cut -d. -f1 /proc/uptime)" "$*" | tee -a /var/log/dash.log
 }
@@ -51,6 +52,7 @@ cleanup() {
 		sv status /service/10-dash | grep -q '^run:' || rc=1
 	fi
 	[ ! -f "$ROOT/var/log/dash.log" ] || cat "$ROOT/var/log/dash.log"
+	[ "$mounted_input" -eq 0 ] || umount "$ROOT/dev/input" || rc=1
 	[ "$mounted_null" -eq 0 ] || umount "$ROOT/dev/null" || rc=1
 	[ "$mounted_fb" -eq 0 ] || umount "$ROOT/dev/fb0" || rc=1
 	[ "$mounted_proc" -eq 0 ] || umount "$ROOT/proc" || rc=1
@@ -78,7 +80,7 @@ quiet_panel || exit 1
 chroot "$ROOT" /bin/busybox --install -s /bin
 mkdir -p "$ROOT/var/run" "$ROOT/var/log"
 # Snapshot public status only; no live runtime directory or credentials are shared.
-for name in dash-usbnet.status dash-sshd.status; do
+for name in dash-usbnet.status dash-sshd.status dash-touch.status; do
 	[ ! -f "/var/run/$name" ] || cp "/var/run/$name" "$ROOT/var/run/$name"
 done
 printf '0s stage1: start, mounts up (development chroot, not a boot)\n' >"$ROOT/var/log/dash.log"
@@ -92,8 +94,13 @@ mount -o bind /dev/fb0 "$ROOT/dev/fb0"
 mounted_fb=1
 mount -o bind /dev/null "$ROOT/dev/null"
 mounted_null=1
+if [ -d /dev/input ]; then
+	mkdir -p "$ROOT/dev/input"
+	mount -o bind /dev/input "$ROOT/dev/input"
+	mounted_input=1
+fi
 chroot "$ROOT" /bin/busybox true
-say "stopping installed panel for a 10-second candidate test"
+say "stopping installed panel for a 60-second candidate test"
 stopped=1
 sv -w 10 down /service/10-dash
 sv status /service/10-dash | grep -q '^down:'
@@ -101,7 +108,7 @@ quiet_panel
 say "starting candidate panel; USB/SSH remain installed"
 chroot "$ROOT" /bin/busybox sh /service/10-dash/run &
 child=$!
-sleep 10
+sleep 60
 kill -0 "$child"
 # ioctl errors currently do not force a nonzero renderer exit; inspect diagnostics.
 if grep -E 'screen failed|screen:|status unavailable|panel service parked' "$ROOT/var/log/dash.log"; then

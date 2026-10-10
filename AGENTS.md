@@ -215,13 +215,18 @@ silently corrupt it.
 - One tool: `build.sh` (multi-call) -- `build`, `userland`, `test`, `rootfs`,
   `check-float`, `fingerprint`, `lock-env`, `hashes`, `verify` -- driven by
   `make`.
-- Userland language: Rust. `rustc` cross-compiles with
-  `--target arm-unknown-linux-gnueabi` (armel, soft-float) and **no external
-  crates** -- the handful of syscalls are declared by hand, so the build stays
-  offline and there is no lockfile to drift.
-- Tests: `make test` runs `rustc --test` on the image's **host** target. No Cargo
-  and no crates; the image needs a native `gcc` + `libc6-dev` for this, which is
-  why they are in the `Containerfile` by name.
+- Userland language: Rust, cross-compiled with
+  `--target arm-unknown-linux-gnueabi` (armel, soft-float). External crates and
+  standard syscall bindings are allowed; prefer maintained libraries over
+  handwritten ABI declarations when they support the stock kernel.
+- Cargo dependencies must be pinned in a committed `Cargo.lock` and made
+  available offline (vendored sources or an immutable verified input). Production
+  builds use `--locked --offline`; dependency updates are deliberate changes.
+  Verify Rust-toolchain and Linux 3.0.35 compatibility, static linking, and FPU
+  instructions on the built artifact. No opportunistic dependency downloads.
+- Tests: `make test` currently runs `rustc --test` on the image's **host** target.
+  Cargo-based components must also run host tests in the pinned environment;
+  native `gcc` + `libc6-dev` remain necessary for linking tests.
 - Pin the flags in `build.sh`: `-O --edition 2021`, and above all
   `-C target-feature=+crt-static` (the rootfs has no dynamic loader).
 - `arm-linux-gnueabi-gcc` stays in the image as the rustc **linker driver
