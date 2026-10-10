@@ -11,7 +11,11 @@ immutable, so a tag per release is an alias with nothing to add.
 
 ## [Unreleased]
 
-<!-- CHANGELOG-PLACEHOLDER -->
+### Changed
+
+- Separate panel observations, pure redraw policy and declarative frame sections
+  from filesystem/process effects. Preserve existing display, timing and failure
+  behavior; add layout, snapshot and renderer-error regression tests.
 
 ## [0.5.0] — 2026-10-09
 
