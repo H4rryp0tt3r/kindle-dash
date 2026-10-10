@@ -31,9 +31,8 @@ built from, never a literal written by hand.
 | touch setup | `40-touch` — bounded stock Cypress setup; no firmware updates |
 | rootfs | 64 MiB ext3, label `dash-root`, no shared libc or loader |
 
-USB setup: [`USB-SSH.md`](USB-SSH.md); Ethernet and key-only login are hardware-tested.
-Touch: [`TOUCH.md`](TOUCH.md); driver/console tests passed, integrated panel and
-fresh-boot initialization await device validation.
+USB: [setup](USB-SSH.md), Ethernet/key login tested.
+Touch: [setup](TOUCH.md), drivers/console tested; integrated panel/fresh boot pending.
 EPDC built in. Stage 1 keeps power on (`-1` to `mxc_epdc_pwrdown`). No raw writes.
 Stage 1 sets raw frontlight brightness **50** after sysfs mounts, with an info
 log and no readback or validation. This is not 50 percent and does not control

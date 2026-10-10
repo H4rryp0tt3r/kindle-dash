@@ -13,19 +13,15 @@ immutable, so a tag per release is an alias with nothing to add.
 
 ### Added
 
-- PW2 tap diagnostics: independently initialize pinned stock Cypress drivers,
-  read Type-B contacts through evdev, and show touch status, tap/rejection counts
-  and raw coordinates through the single panel owner. Reject holds, drags and
-  multi-finger interactions; cancel lost streams without guessing finger state.
-- Test touch in the disposable chroot with input access and a 60-second window.
-  Cover observed device traces, report recovery, missing/disconnected input,
-  bounded setup and cleanup; preserve installed USB/SSH and device identity.
+- PW2 tap diagnostics: pinned Cypress startup, evdev Type-B input, status/counts/raw
+  coordinates. Single panel owner; reject holds/drags/multiple fingers; cancel lost streams.
+- 60-second touch chroot test. Cover traces, recovery, bad/missing/disconnected
+  input, setup deadlines and cleanup. Preserve USB/SSH/device identity.
 
 ### Changed
 
-- Allow external Rust crates and standard syscall bindings. Cargo downloads
-  dependencies using the committed lockfile; no offline compilation or vendoring
-  requirement. Static ARM/FPU and old-kernel checks remain mandatory.
+- Crates/syscall bindings allowed. Cargo.lock + online `--locked`; no vendoring.
+  Static ARM/FPU/old-kernel checks stay mandatory.
 
 ## [0.5.0] — 2026-10-09
 
