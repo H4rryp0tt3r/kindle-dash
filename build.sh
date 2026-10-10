@@ -36,11 +36,9 @@ MAIN_KERNEL=main-uImage
 DIAG_KERNEL=diag-uImage
 ROOTFS=dash-rootfs.img
 
-# Binaries built by Cargo from the root Cargo.toml (they use vendored crates);
+# Binaries built by Cargo from the root Cargo.toml;
 # every other top-level src/*.rs is still one direct rustc invocation.
 CARGO_BINS="dash-status"
-# Vendored crate sources: a private source archive, hashed as archive bytes.
-RUST_DEPS=$HERE/third-party/rust-deps
 # Stock touchscreen modules shipped in /lib/modules/3.0.35-lab126. The loader
 # can rewrite controller firmware and device_access/debug expose raw controller
 # commands, so those three must never reach the rootfs.
@@ -85,52 +83,22 @@ EOF
 }
 
 # ============================================================== cargo inputs
-# The source tree a container needs for both rustc and Cargo, as one tar stream:
-# the root Cargo.toml + Cargo.lock, src/, tests/ (Cargo integration tests and
-# fixtures; never staged into the rootfs) and the pinned vendor archive with its
-# SHA256SUMS. Container-side layout is fixed (/s/...), so nothing host-specific
-# reaches the compiler.
+# Cargo.lock fixes dependency versions/checksums; Cargo downloads their sources
+# from crates.io during build/test. Integration tests never enter the rootfs.
 cargo_sources_tar() {
 	local ROOT=$1
 	local f
-	for f in "$ROOT/Cargo.toml" "$ROOT/Cargo.lock" \
-		"$RUST_DEPS/vendor.tar.gz" "$RUST_DEPS/SHA256SUMS"; do
-		[ -f "$f" ] || { echo "missing Cargo input: $f (run: make pins)" >&2; return 1; }
+	for f in "$ROOT/Cargo.toml" "$ROOT/Cargo.lock"; do
+		[ -f "$f" ] || { echo "missing Cargo input: $f" >&2; return 1; }
 	done
 	COPYFILE_DISABLE=1 tar -cf - --no-xattrs \
-		-C "$ROOT" Cargo.toml Cargo.lock src tests \
-		-C "$HERE" third-party/rust-deps/vendor.tar.gz third-party/rust-deps/SHA256SUMS
-}
-
-# Container-side prologue: check the vendor archive BEFORE extracting it, refuse
-# any member outside vendor/, then point Cargo at it with the network off. The
-# containers also run with --network none, so a missing crate is an error rather
-# than a download.
-cargo_prelude() {
-	cat <<'EOF'
-( cd /s/third-party/rust-deps && sha256sum -c --strict --quiet SHA256SUMS ) \
-	|| { echo "FAIL: vendor.tar.gz does not match its SHA256SUMS" >&2; exit 1; }
-tar -tzf /s/third-party/rust-deps/vendor.tar.gz > /tmp/vendor-members
-if grep -v -e "^vendor/" -e "^vendor$" /tmp/vendor-members > /tmp/vendor-invalid; then
-	echo "FAIL: vendor.tar.gz has members outside vendor/" >&2; exit 1
-fi
-if grep -Eq "(^|/)\\.\\.(/|$)" /tmp/vendor-members; then
-	echo "FAIL: vendor.tar.gz has parent-directory members" >&2; exit 1
-fi
-tar -C /s -xzf /s/third-party/rust-deps/vendor.tar.gz --no-same-owner
-export CARGO_HOME=/s/cargo-home CARGO_TARGET_DIR=/s/target CARGO_NET_OFFLINE=true
-mkdir -p "$CARGO_HOME"
-printf "%s\n" "[source.crates-io]" "replace-with = \"dash-vendor\"" \
-	"[source.dash-vendor]" "directory = \"/s/vendor\"" \
-	"[net]" "offline = true" > "$CARGO_HOME/config.toml"
-cargo --version >&2
-EOF
+		-C "$ROOT" Cargo.toml Cargo.lock src tests
 }
 
 # ============================================================== userland
 # Cross-compile every *.rs in <srcdir> into a static ARM binary in <outdir>.
 # CARGO_BINS are skipped there and built instead by Cargo from <srcdir>/../
-# Cargo.toml, offline, against the vendored crates.
+# Cargo.toml, with dependencies downloaded according to Cargo.lock.
 # Static is not optional: the rootfs has no libc and no dynamic loader.
 cmd_userland() {
 	local SRC=${1:?usage: build.sh userland <srcdir> <outdir>}
@@ -157,9 +125,8 @@ cmd_userland() {
 
 	# Cargo-built binaries take the same static soft-float settings; the rest of
 	# the release profile (opt-level, codegen-units=1, panic=abort, strip) is
-	# Cargo.toml's. The remap keeps the container's vendor path out of panic
-	# location strings.
-	export DASH_CARGO_RUSTFLAGS=${DASH_CARGO_RUSTFLAGS:--C target-feature=+crt-static --remap-path-prefix=/s/vendor=vendor --remap-path-prefix=/s=.}
+	# Cargo.toml's. Remap registry/container paths for content reproducibility.
+	export DASH_CARGO_RUSTFLAGS=${DASH_CARGO_RUSTFLAGS:--C target-feature=+crt-static --remap-path-prefix=/opt/cargo/registry/src=registry --remap-path-prefix=/s=.}
 
 	# Cargo needs the package root: <srcdir> must be <root>/src.
 	[ "$(basename "$SRC")" = src ] || { echo "userland: <srcdir> must be a src/ directory" >&2; exit 1; }
@@ -176,7 +143,7 @@ cmd_userland() {
 	echo "=== userland: $RSRC source file(s) -> $OUT (Cargo: $CARGO_BINS) ==="
 
 	cargo_sources_tar "$ROOT" \
-	| podman run -i --rm --pull never --network none "$DASH_BUILD_IMAGE" bash -c '
+	| podman run -i --rm --pull never "$DASH_BUILD_IMAGE" bash -c '
 set -euo pipefail
 RF='"$(printf '%q' "$DASH_RUSTFLAGS")"'
 CRF='"$(printf '%q' "$DASH_CARGO_RUSTFLAGS")"'
@@ -191,11 +158,10 @@ for r in /s/src/*.rs; do
 	rustc $RF -o "/out/$b" "$r"
 	echo "built $b" >&2
 done
-'"$(cargo_prelude)"'
 cd /s
 CARGO_TARGET_ARM_UNKNOWN_LINUX_GNUEABI_LINKER=arm-linux-gnueabi-gcc \
 CARGO_TARGET_ARM_UNKNOWN_LINUX_GNUEABI_RUSTFLAGS="$CRF" \
-	cargo build --release --locked --offline --target arm-unknown-linux-gnueabi --bins >&2
+	cargo build --release --locked --target arm-unknown-linux-gnueabi --bins >&2
 for b in $CB; do
 	cp "/s/target/arm-unknown-linux-gnueabi/release/$b" "/out/$b"
 	echo "built $b (cargo)" >&2
@@ -416,9 +382,8 @@ cat /out/rootfs.img
 }
 
 # ============================================================== test
-# Run the userland unit tests on the build image's HOST rustc. No Cargo, no
-# crates, no extra packages: `rustc --test` is enough, and it links against the
-# image's own glibc.
+# Run standalone rustc tests and locked Cargo tests on the build image's HOST
+# target, linked against the image's own glibc.
 #
 # The tests cover the pure logic only (record reading, fill length, font lookup,
 # geometry). Anything that needs /dev/fb0 is not a unit test.
@@ -432,7 +397,7 @@ cmd_test() {
 
 	echo "=== test: $SRC/*.rs + Cargo ($CARGO_BINS) ==="
 	cargo_sources_tar "$(dirname "$SRC")" \
-	| podman run -i --rm --pull never --network none "$DASH_BUILD_IMAGE" bash -c '
+	| podman run -i --rm --pull never "$DASH_BUILD_IMAGE" bash -c '
 set -euo pipefail
 CB='"$(printf '%q' "$CARGO_BINS")"'
 mkdir -p /s /out
@@ -452,12 +417,11 @@ for r in /s/src/*.rs; do
 		echo "--- $b (no #[cfg(test)] module; nothing to run)" >&2
 	fi
 done
-'"$(cargo_prelude)"'
 # Host target: unit tests of the Cargo binaries (and the modules they include)
 # plus the integration tests under tests/.
 echo "--- cargo test" >&2
 cd /s
-cargo test --locked --offline -- --test-threads=1
+cargo test --locked -- --test-threads=1
 n=$((n + 1))
 [ "$n" -gt 0 ] || { echo "no test module found in any source file" >&2; exit 1; }
 echo "TEST_OK $n module(s)" >&2
@@ -700,7 +664,7 @@ cmd_build() {
 		"$HERE/third-party/busybox" "$HERE/third-party/runit" \
 		"$HERE/third-party/eink-firmware" "$HERE/recovery" \
 		"$HERE/third-party/dropbear" "$HERE/third-party/usbnet" \
-		"$HERE/third-party/touch" "$HERE/third-party/rust-deps" >/dev/null
+		"$HERE/third-party/touch" >/dev/null
 	[ -f "$HERE/Cargo.toml" ] && [ -f "$HERE/Cargo.lock" ] || {
 		echo "missing $HERE/Cargo.toml or Cargo.lock" >&2; exit 1; }
 

@@ -58,7 +58,6 @@
 /artifacts/
 /target/
 /third-party/touch/
-/third-party/rust-deps/
 
 # Python bytecode from the fastboot helper
 __pycache__/

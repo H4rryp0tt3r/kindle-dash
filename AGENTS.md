@@ -219,11 +219,11 @@ silently corrupt it.
   `--target arm-unknown-linux-gnueabi` (armel, soft-float). External crates and
   standard syscall bindings are allowed; prefer maintained libraries over
   handwritten ABI declarations when they support the stock kernel.
-- Cargo dependencies must be pinned in a committed `Cargo.lock` and made
-  available offline (vendored sources or an immutable verified input). Production
-  builds use `--locked --offline`; dependency updates are deliberate changes.
+- Cargo dependencies must be pinned in a committed `Cargo.lock`. Build/test use
+  `--locked` and may download crates from crates.io; offline compilation and
+  vendoring are not required. Dependency updates are deliberate lockfile changes.
   Verify Rust-toolchain and Linux 3.0.35 compatibility, static linking, and FPU
-  instructions on the built artifact. No opportunistic dependency downloads.
+  instructions on the built artifact.
 - Tests: `make test` currently runs `rustc --test` on the image's **host** target.
   Cargo-based components must also run host tests in the pinned environment;
   native `gcc` + `libc6-dev` remain necessary for linking tests.

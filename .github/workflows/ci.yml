@@ -92,13 +92,7 @@ jobs:
           fi
       - name: run the unit tests
         if: steps.gate.outputs.found == 'true'
-        env:
-          DASH_PINS_TOKEN: ${{ secrets.DASH_PINS_TOKEN }}
         run: |
-          if [ -z "${DASH_PINS_TOKEN:-}" ]; then
-            echo "::error::DASH_PINS_TOKEN is required for the pinned offline Cargo sources. Fork PRs must be brought into this repository."
-            exit 1
-          fi
           make test
           python3 tests/dev-chroot.py
 

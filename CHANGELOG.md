@@ -23,9 +23,9 @@ immutable, so a tag per release is an alias with nothing to add.
 
 ### Changed
 
-- Allow external Rust crates and standard syscall bindings. Production dependency
-  sources must remain pinned, verified and available offline; static ARM/FPU and
-  old-kernel compatibility checks remain mandatory.
+- Allow external Rust crates and standard syscall bindings. Cargo downloads
+  dependencies using the committed lockfile; no offline compilation or vendoring
+  requirement. Static ARM/FPU and old-kernel checks remain mandatory.
 
 ## [0.5.0] — 2026-10-09
 

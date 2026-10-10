@@ -164,12 +164,10 @@ env` refuses to build against anything else, and `make env-bump` (rebuild,
 republish, re-pin) is the only supported way to change it.
 
 `dash-status` uses Cargo with evdev/libc and standard syscall bindings. The root
-`Cargo.lock` pins the graph; `third-party/rust-deps/vendor.tar.gz` in the private
-pins repo supplies unmodified crate sources and upstream licenses. SHA256SUMS
-hashes the archive itself; Cargo checks per-crate registry checksums against the
-lockfile. Build/test verify before extraction and use `--locked --offline` with
-container networking disabled. Other standalone binaries still use direct rustc.
-Dependency updates are reviewed input changes, not fresh resolution during a build.
+`Cargo.lock` pins versions and registry checksums. Build/test use `--locked` and
+download crate sources from crates.io; no vendored archive or private Rust-source
+input is required. Other standalone binaries still use direct rustc. Dependency
+updates are reviewed lockfile changes, not fresh resolution during a build.
 Static ARM, old-kernel and FPU compatibility still require artifact/device checks.
 
 `arm-unknown-linux-gnueabi` is soft-float, the only float ABI this CPU has

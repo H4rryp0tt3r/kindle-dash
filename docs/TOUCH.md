@@ -63,8 +63,8 @@ current SSH trial proved the individual module sequence without reflashing.
 Regression coverage includes the recorded 371-event trace (six accepted taps,
 four multi-contact rejections), report boundaries, timestamp reversal, dropped
 reports, malformed slots/ranges, idle blocking and input-mount cleanup. Static
-ARM/soft-float/FPU checks run on the packaged binaries. Dependencies are locked
-and supplied as verified offline sources through the pins repository.
+ARM/soft-float/FPU checks run on the packaged binaries. Cargo dependencies are
+locked and downloaded from crates.io during build/test.
 
 ## Libraries
 
