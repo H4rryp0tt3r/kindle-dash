@@ -52,7 +52,10 @@ RAW_INPUTS := \
 	$(HERE)/third-party/dropbear/dropbearkey \
 	$(HERE)/third-party/usbnet/fsl_otg_arc.ko \
 	$(HERE)/third-party/usbnet/arcotg_udc.ko \
-	$(HERE)/third-party/usbnet/g_ether.ko
+	$(HERE)/third-party/usbnet/g_ether.ko \
+	$(HERE)/third-party/touch/cyttsp4_core.ko \
+	$(HERE)/third-party/touch/cyttsp4_i2c.ko \
+	$(HERE)/third-party/touch/cyttsp4_mt_b.ko
 
 .PHONY: help pins bootstrap env env-bump unpack build test verify fingerprint \
         rebuild-check shell clean current provision-ssh test-provision
@@ -192,8 +195,7 @@ build: pins unpack env
 	@$(HERE)/build.sh build
 
 # ---------------------------------------------------------------- test
-# rustc --test runs the renderer's own unit tests. No crates, no Cargo, no
-# extra packages in the build image.
+# rustc --test runs the standalone sources; Cargo tests download locked crates.
 test: env
 	@$(HERE)/build.sh test "$(HERE)/src"
 
@@ -203,7 +205,8 @@ verify:
 		$(HERE)/base-kernel $(HERE)/base-diag \
 		$(HERE)/third-party/busybox $(HERE)/third-party/runit \
 		$(HERE)/third-party/eink-firmware $(HERE)/recovery \
-		$(HERE)/third-party/dropbear $(HERE)/third-party/usbnet
+		$(HERE)/third-party/dropbear $(HERE)/third-party/usbnet \
+		$(HERE)/third-party/touch
 
 # Personalisation is separate: the canonical release image never contains keys.
 # PUBKEY must be an explicit OpenSSH Ed25519 public-key file, never a private key.

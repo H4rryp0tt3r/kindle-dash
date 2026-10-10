@@ -53,34 +53,27 @@ ssh -i /path/private-key root@192.168.15.244 'cat > /var/run/test.frame' < test.
 
 ## Development without reflashing
 
-Build, then test the candidate panel userspace in a disposable rootfs folder:
+Build. Test candidate panel in disposable chroot:
 
 ```
 make test && make build
 python3 tools/dev-chroot.py --pubkey "$PUBKEY"
 ```
 
-Host helper regression tests: `python3 tests/dev-chroot.py` (no device access).
+Host regression: `python3 tests/dev-chroot.py`. No device access.
 
-`PUBKEY` is the chosen Ed25519 public-key selector used with your SSH agent.
-The private key stays in the agent. Host-key verification remains enabled.
-
-The helper extracts the canonical image, streams a compressed tree over SSH,
-checks its hash, and chroots into a private `/tmp/dash-chroot.*` directory.
-Only `/proc`, `/dev/fb0` and `/dev/null` are exposed. Candidate logs/runtime
-files are separate; USB/SSH status is a snapshot. No credentials are copied.
-
-It stops installed `10-dash`, waits for the old renderer, runs the candidate
-panel for ten seconds, prints its frame/log, restores installed `10-dash`, and
-removes the candidate mounts/tree. Watch the panel for visual correctness.
-USB and SSH services are not restarted. A dirty source checkout is labelled.
-
-This tests packaged application userspace on the actual CPU/kernel, **not a
-boot**. Do not run candidate init stages, USB or SSH services in the chroot.
-Chroot is not a sandbox. A stuck renderer leaves the panel stopped and candidate
-retained instead of starting a competing owner. On failure inspect the printed
-path and `/var/log/dash.log`; never delete a tree with active bind mounts.
-Full-image boot validation still uses the runbook. No reboot is performed.
+- `PUBKEY`: Ed25519 public-key selector. Private key stays in agent; host-key checks stay.
+- Extract canonical image, transfer/check archive, use private `/tmp/dash-chroot.*`.
+  Bind `/proc`, `/dev/fb0`, `/dev/null`, `/dev/input` when present.
+- Separate logs/runtime; status snapshot only. No credentials copied.
+  Host touch modules must already be loaded. Candidate never loads/reloads them.
+- Stop installed `10-dash`; wait for renderer. Run candidate 60 seconds.
+  Print frame/log, restore installed panel, remove mounts/tree. Watch panel.
+  USB/SSH not restarted. Dirty checkout labelled.
+- Userspace test, **not boot or sandbox**. No candidate init/USB/SSH services.
+  Stuck renderer: panel stays stopped, candidate retained; no competing owner.
+  Inspect printed path + `/var/log/dash.log`. Never delete mounted tree.
+- No reboot. Full-image validation: [RUNBOOK](RUNBOOK.md). Touch: [TOUCH](TOUCH.md).
 
 ## Screen + failures
 

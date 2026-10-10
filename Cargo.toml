@@ -1,0 +1,24 @@
+[package]
+name = "dash-status"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.83"
+publish = false
+
+[[bin]]
+name = "dash-status"
+path = "src/dash-status.rs"
+
+[[test]]
+name = "touch-trace"
+path = "tests/touch-trace.rs"
+
+[dependencies]
+evdev = { version = "=0.13.2", default-features = false }
+libc = "=0.2.177"
+
+[profile.release]
+opt-level = 3
+codegen-units = 1
+panic = "abort"
+strip = true

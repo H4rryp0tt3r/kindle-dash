@@ -11,7 +11,17 @@ immutable, so a tag per release is an alias with nothing to add.
 
 ## [Unreleased]
 
-<!-- CHANGELOG-PLACEHOLDER -->
+### Added
+
+- PW2 tap diagnostics: pinned Cypress startup, evdev Type-B input, status/counts/raw
+  coordinates. Single panel owner; reject holds/drags/multiple fingers; cancel lost streams.
+- 60-second touch chroot test. Cover traces, recovery, bad/missing/disconnected
+  input, setup deadlines and cleanup. Preserve USB/SSH/device identity.
+
+### Changed
+
+- Crates/syscall bindings allowed. Cargo.lock + online `--locked`; no vendoring.
+  Static ARM/FPU/old-kernel checks stay mandatory.
 
 ## [0.5.0] — 2026-10-09
 

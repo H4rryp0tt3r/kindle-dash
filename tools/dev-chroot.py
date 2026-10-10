@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run a ten-second panel test from a disposable rootfs over USB SSH."""
+"""Run a sixty-second panel/touch test from a disposable rootfs over USB SSH."""
 import argparse
 import hashlib
 from pathlib import Path

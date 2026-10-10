@@ -6,9 +6,9 @@ i.MX6SL): Amazon's stock lab126 3.0.35 kernel with the EPDC e-ink panel built in
 widget dashboard. There is no serial console; the panel and
 `/var/log/dash.log` are the only output.
 
-**Works on device:** boot + Hello World.
-**Added, hardware untested:** USB SSH + streaming boot/status/errors on screen.
-Setup: [`docs/USB-SSH.md`](docs/USB-SSH.md).
+**Tested:** boot/panel, USB Ethernet/key-only SSH, chroot, Cypress drivers/console taps.
+**Pending:** integrated touch panel + fresh boot.
+Setup: [`docs/USB-SSH.md`](docs/USB-SSH.md), [`docs/TOUCH.md`](docs/TOUCH.md).
 
 ## Build
 

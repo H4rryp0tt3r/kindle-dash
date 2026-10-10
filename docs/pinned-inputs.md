@@ -46,6 +46,14 @@ firmware which is already gzip and committed as-is.
 - Build checks: static ARM, module vermagic, FPU. Hardware still untested.
 - Device keys/seeds not release inputs. Setup: [`USB-SSH.md`](USB-SSH.md).
 
+## Touch inputs
+
+- Stock `cyttsp4_i2c`, `cyttsp4_core`, `cyttsp4_mt_b` only. Raw SHA256SUMS,
+  gz twins, vermagic `3.0.35-lab126`. Sequence tested on PW2 board027.
+- Recovery off. No force-load, loader/debug/device_access or firmware updates.
+  `40-touch` checks hashes/bindings/input before ready.
+- Real contacts tested; fresh boot + integrated panel pending. [Details](TOUCH.md).
+
 ## `base-kernel/` — pinned main-slot kernel
 
 The one artifact Dash cannot rebuild (the Amazon GPL source is not here). Treat
@@ -152,10 +160,10 @@ on, so `BUILD-IMAGE.lock` records the image id and its registry digest, `make
 env` refuses to build against anything else, and `make env-bump` (rebuild,
 republish, re-pin) is the only supported way to change it.
 
-There is no `Cargo.lock` and no vendored crate, because `src/` has **no external
-dependencies** -- `screen.rs` declares `open`/`close`/`mmap`/`munmap`/`ioctl`
-itself. That is deliberate: it keeps `make build` offline and removes the one
-thing that could make identical inputs produce a different binary.
+`dash-status`: Cargo + evdev/libc. `Cargo.lock` pins versions/checksums;
+`--locked` downloads from crates.io. No vendoring/private Rust sources.
+Other binaries: direct rustc. Review lockfile updates; keep static ARM,
+Linux 3.0.35 and FPU artifact/device checks.
 
 `arm-unknown-linux-gnueabi` is soft-float, the only float ABI this CPU has
 (golden rule 14), and `build.sh check-float` proves it on every build rather
