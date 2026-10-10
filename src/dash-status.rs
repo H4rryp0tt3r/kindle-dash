@@ -145,31 +145,58 @@ fn log_tail(path: &Path) -> io::Result<Vec<String>> {
     };
     Ok(boot_lines(data))
 }
-fn frame(
-    release: &str,
-    kernel: &str,
-    uptime: &str,
-    usb: &Status,
-    ssh: &Status,
-    expired: bool,
-    logs: &[String],
-) -> String {
-    let mut out = vec![
+#[derive(Debug, PartialEq)]
+struct Snapshot {
+    logs: Vec<String>,
+    usb: Status,
+    ssh: Status,
+    show_timeout: bool,
+}
+impl Snapshot {
+    fn new(logs: Vec<String>, usb: Status, ssh: Status, expired: bool) -> Self {
+        let show_timeout = expired && (!usb.terminal() || !ssh.terminal());
+        Self {
+            logs,
+            usb,
+            ssh,
+            show_timeout,
+        }
+    }
+}
+#[derive(Default)]
+struct MonitorState {
+    last_snapshot: Option<Snapshot>,
+    last_attempted_frame: String,
+}
+fn needs_compose(state: &MonitorState, snapshot: &Snapshot) -> bool {
+    state.last_snapshot.as_ref() != Some(snapshot)
+}
+fn frame(release: &str, kernel: &str, uptime: &str, snapshot: &Snapshot) -> String {
+    let header = vec![
         "Hello World!".to_string(),
         format!("Dash OS {}", printable(release.trim())),
         format!("uptime {uptime}s"),
         printable(kernel.trim()),
         String::new(),
     ];
-    out.extend(wrap(&usb.line("USB", expired)));
-    out.extend(wrap(&ssh.line("SSH", expired)));
-    out.push("Kindle: 192.168.15.244".into());
-    out.push("Mac: 192.168.15.201/24".into());
-    out.push("Log available in diagnostics".into());
-    out.push(String::new());
+    let services = [
+        snapshot.usb.line("USB", snapshot.show_timeout),
+        snapshot.ssh.line("SSH", snapshot.show_timeout),
+    ]
+    .into_iter()
+    .flat_map(|line| wrap(&line));
+    let connection = [
+        "Kindle: 192.168.15.244".into(),
+        "Mac: 192.168.15.201/24".into(),
+        "Log available in diagnostics".into(),
+        String::new(),
+    ];
+    let mut out = header;
+    out.extend(services);
+    out.extend(connection);
     let rows = LOG_ROWS.min(40usize.saturating_sub(out.len()));
-    let start = logs.len().saturating_sub(rows);
-    out.extend_from_slice(&logs[start..]);
+    let start = snapshot.logs.len().saturating_sub(rows);
+    out.extend_from_slice(&snapshot.logs[start..]);
     out.into_iter()
         .take(40)
         .map(|l| {
@@ -270,6 +297,25 @@ fn listener(pid: u32) -> io::Result<()> {
         wait(-1, 25)?;
     }
 }
+fn observe(log: &Path, run: &Path, deadline: Instant) -> (Snapshot, bool) {
+    let logs = log_tail(log).unwrap_or_default();
+    let usb = read_status(&run.join("dash-usbnet.status"));
+    let ssh = read_status(&run.join("dash-sshd.status"));
+    let expired = Instant::now() >= deadline;
+    (Snapshot::new(logs, usb, ssh, expired), expired)
+}
+fn render_frame(run: &Path, screen: &Path, frame: &str) -> io::Result<()> {
+    let path = run.join("dash.frame");
+    fs::write(&path, frame)?;
+    let output = Command::new(screen).arg(path).output()?;
+    if !output.status.success() {
+        eprintln!("10-dash: screen failed: {}", output.status);
+    }
+    for line in String::from_utf8_lossy(&output.stderr).lines() {
+        eprintln!("10-dash: screen: {}", printable(line));
+    }
+    Ok(())
+}
 fn monitor(
     log: &Path,
     run: &Path,
@@ -280,41 +326,21 @@ fn monitor(
 ) -> io::Result<()> {
     let mut watch = Watcher::new(log.parent().unwrap(), run)?;
     let deadline = Instant::now() + watchdog;
-    let mut previous = String::new();
-    let mut last_logs = Vec::new();
-    let mut usb = Status::pending();
-    let mut ssh = Status::pending();
-    let mut last_expired = false;
-    let mut first = true;
+    let mut state = MonitorState::default();
     loop {
         watch.drain()?;
-        let logs = log_tail(log).unwrap_or_default();
-        let u = read_status(&run.join("dash-usbnet.status"));
-        let s = read_status(&run.join("dash-sshd.status"));
-        let expired = Instant::now() >= deadline;
-        let show_timeout = expired && (!u.terminal() || !s.terminal());
+        let (snapshot, expired) = observe(log, run, deadline);
         // Intermediate stages are still shown with streamed log lines, but the
         // clock alone never makes the screen repaint continuously.
-        if first || logs != last_logs || u != usb || s != ssh || show_timeout != last_expired {
+        if needs_compose(&state, &snapshot) {
             let uptime = fs::read_to_string("/proc/uptime").unwrap_or_default();
             let uptime = uptime.split('.').next().unwrap_or("?");
-            let next = frame(release, kernel, uptime, &u, &s, expired, &logs);
-            if next != previous {
-                fs::write(run.join("dash.frame"), &next)?;
-                let output = Command::new(screen).arg(run.join("dash.frame")).output()?;
-                if !output.status.success() {
-                    eprintln!("10-dash: screen failed: {}", output.status);
-                }
-                for line in String::from_utf8_lossy(&output.stderr).lines() {
-                    eprintln!("10-dash: screen: {}", printable(line));
-                }
-                previous = next;
+            let next = frame(release, kernel, uptime, &snapshot);
+            if next != state.last_attempted_frame {
+                render_frame(run, screen, &next)?;
+                state.last_attempted_frame = next;
             }
-            first = false;
-            last_logs = logs;
-            usb = u;
-            ssh = s;
-            last_expired = show_timeout;
+            state.last_snapshot = Some(snapshot);
         }
         let timeout = if !expired {
             deadline
@@ -410,16 +436,159 @@ mod tests {
             "0.2.0",
             "3.0.35-lab126",
             "3",
-            &Status::pending(),
-            &Status::pending(),
-            false,
-            &logs,
+            &Snapshot::new(logs, Status::pending(), Status::pending(), false),
         );
         assert!(f.contains("Hello World!"));
         assert!(f.contains("log 99"));
         assert!(!f.contains("log 0\n"));
         assert!(f.lines().count() <= 40);
         assert!(f.lines().all(|l| l.len() <= 45));
+    }
+    #[test]
+    fn frame_layout_is_exact() {
+        assert_eq!(
+            frame(
+                " test\n",
+                " kernel\n",
+                "3",
+                &Snapshot::new(
+                    vec!["new log".into()],
+                    parse_status("ready\nUSB address"),
+                    parse_status("disabled\nnot provisioned"),
+                    false,
+                ),
+            ),
+            concat!(
+                "  Hello World!\n",
+                "  Dash OS test\n",
+                "  uptime 3s\n",
+                "  kernel\n",
+                "  \n",
+                "  USB: configured - USB address\n",
+                "  SSH: disabled - not provisioned\n",
+                "  Kindle: 192.168.15.244\n",
+                "  Mac: 192.168.15.201/24\n",
+                "  Log available in diagnostics\n",
+                "  \n",
+                "  new log\n",
+            )
+        );
+    }
+    #[test]
+    fn wrapped_status_leaves_only_remaining_rows_for_logs() {
+        let status = parse_status(&format!("starting\n{}", "x".repeat(240)));
+        let logs: Vec<_> = (0..30).map(|i| format!("log {i}")).collect();
+        let snapshot = Snapshot::new(logs, status.clone(), status, false);
+        let f = frame("test", "kernel", "3", &snapshot);
+        assert_eq!(f.lines().count(), 40);
+        assert!(!f.contains("  log 10\n"));
+        assert!(f.contains("  log 11\n"));
+        assert!(f.ends_with("  log 29\n"));
+    }
+    #[test]
+    fn latest_boot_filters_both_diagnostic_sources() {
+        assert_eq!(
+            boot_lines(concat!(
+                "old\n0s stage1: start, mounts up\nold detail\n",
+                "0s stage1: start, mounts up\n",
+                "10-dash: screen failed\ndash-status: failure\n",
+                "new\n\nlast\tline",
+            )),
+            vec!["0s stage1: start, mounts up", "new", "", "last line"]
+        );
+    }
+    #[test]
+    fn composition_depends_on_complete_snapshot() {
+        let pending = || {
+            Snapshot::new(
+                vec!["log".into()],
+                Status::pending(),
+                Status::pending(),
+                false,
+            )
+        };
+        let mut state = MonitorState::default();
+        assert!(needs_compose(&state, &pending()));
+        state.last_snapshot = Some(pending());
+        assert!(!needs_compose(&state, &pending()));
+        let mut logs = pending();
+        logs.logs.push("another line".into());
+        assert!(needs_compose(&state, &logs));
+        let mut usb = pending();
+        usb.usb = parse_status("ready\nconfigured");
+        assert!(needs_compose(&state, &usb));
+        let mut ssh = pending();
+        ssh.ssh = parse_status("disabled\nnot provisioned");
+        assert!(needs_compose(&state, &ssh));
+        let timed_out = Snapshot::new(
+            vec!["log".into()],
+            Status::pending(),
+            Status::pending(),
+            true,
+        );
+        assert!(needs_compose(&state, &timed_out));
+    }
+    #[test]
+    fn timeout_changes_only_pending_display_and_late_status_recovers() {
+        let terminal = |expired| {
+            Snapshot::new(
+                vec![],
+                parse_status("ready\nconfigured"),
+                parse_status("disabled\nno key"),
+                expired,
+            )
+        };
+        assert_eq!(terminal(false), terminal(true));
+        let mut state = MonitorState {
+            last_snapshot: Some(terminal(false)),
+            ..MonitorState::default()
+        };
+        assert!(!needs_compose(&state, &terminal(true)));
+        let timed_out = Snapshot::new(vec![], Status::pending(), Status::pending(), true);
+        assert!(needs_compose(&state, &timed_out));
+        assert!(frame("test", "kernel", "3", &timed_out).contains("TIMED OUT"));
+        state.last_snapshot = Some(timed_out);
+        assert!(needs_compose(&state, &terminal(true)));
+        assert!(!frame("test", "kernel", "3", &terminal(true)).contains("TIMED OUT"));
+    }
+    #[test]
+    fn changed_offscreen_input_can_have_identical_frame() {
+        let make = |first: &str| {
+            let mut logs = vec![first.into()];
+            logs.extend((0..20).map(|i| format!("log {i}")));
+            Snapshot::new(logs, Status::pending(), Status::pending(), false)
+        };
+        let old = make("old hidden line");
+        let last_attempted_frame = frame("test", "kernel", "3", &old);
+        let mut state = MonitorState {
+            last_snapshot: Some(old),
+            last_attempted_frame,
+        };
+        let next = make("new hidden line");
+        assert!(needs_compose(&state, &next));
+        assert_eq!(
+            frame("test", "kernel", "3", &next),
+            state.last_attempted_frame
+        );
+        assert_ne!(
+            frame("test", "kernel", "4", &next),
+            state.last_attempted_frame
+        );
+        state.last_snapshot = Some(next);
+        assert!(!needs_compose(&state, &make("new hidden line")));
+    }
+    #[test]
+    fn renderer_nonzero_exit_is_completed_attempt_but_io_errors_propagate() {
+        let p = std::env::temp_dir().join(format!("dash-render-test-{}", std::process::id()));
+        fs::create_dir(&p).unwrap();
+        let screen = p.join("screen");
+        fs::write(&screen, "#!/bin/sh\nprintf 'bad\\toutput\\n' >&2\nexit 1\n").unwrap();
+        fs::set_permissions(&screen, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(render_frame(&p, &screen, "frame").is_ok());
+        assert_eq!(fs::read_to_string(p.join("dash.frame")).unwrap(), "frame");
+        assert!(render_frame(&p, &p.join("missing-screen"), "next").is_err());
+        assert!(render_frame(&p.join("missing-run"), &screen, "next").is_err());
+        fs::remove_dir_all(p).unwrap();
     }
     #[test]
     fn listener_requires_exact_usb_address_port_state() {
